@@ -40,8 +40,13 @@ func (cl Client) GetGenesis(ctx context.Context) (*Genesis, error) {
 }
 
 func (cl Client) GetBlockRoot(ctx context.Context, slot uint64, allowOptimistic bool) (*BlockRootResponse, error) {
+	return cl.GetBlockRootByID(ctx, fmt.Sprintf("%d", slot), allowOptimistic)
+}
+
+// GetBlockRootByID gets block root by block ID (slot number, "finalized", "head", or block root)
+func (cl Client) GetBlockRootByID(ctx context.Context, blockId string, allowOptimistic bool) (*BlockRootResponse, error) {
 	var res BlockRootResponse
-	if err := cl.get(ctx, fmt.Sprintf("/eth/v1/beacon/blocks/%v/root", slot), &res); err != nil {
+	if err := cl.get(ctx, fmt.Sprintf("/eth/v1/beacon/blocks/%s/root", blockId), &res); err != nil {
 		return nil, err
 	}
 	if !allowOptimistic && res.ExecutionOptimistic {
