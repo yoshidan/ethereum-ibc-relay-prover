@@ -15,6 +15,7 @@ const (
 	Mainnet = "mainnet"
 	Minimal = "minimal"
 	Sepolia = "sepolia"
+	Devnet  = "devnet" // Uses mainnet preset with custom fork schedule (all forks at epoch 0)
 )
 
 const (
@@ -136,7 +137,7 @@ func (prc *ProverConfig) GetMaxClockDrift() time.Duration {
 // NOTE the prover supports only the mainnet and minimal preset for now
 func (prc *ProverConfig) IsMainnetPreset() bool {
 	switch prc.Network {
-	case Mainnet, Sepolia:
+	case Mainnet, Sepolia, Devnet:
 		return true
 	case Minimal:
 		return false
@@ -253,6 +254,43 @@ func (prc *ProverConfig) getForkParameters() *lctypes.ForkParameters {
 				{
 					Version: []byte{144, 0, 0, 117},
 					Epoch:   272640,
+					Spec:    &FuluSpec,
+				},
+			},
+		}
+	case Devnet:
+		// Devnet uses mainnet preset but all forks at epoch 0 (like Kurtosis devnet)
+		return &lctypes.ForkParameters{
+			GenesisForkVersion: []byte{0x10, 0x00, 0x00, 0x00},
+			Forks: []*lctypes.Fork{
+				{
+					Version: []byte{0x20, 0x00, 0x00, 0x00},
+					Epoch:   0,
+					Spec:    &AltairSpec,
+				},
+				{
+					Version: []byte{0x30, 0x00, 0x00, 0x00},
+					Epoch:   0,
+					Spec:    &BellatrixSpec,
+				},
+				{
+					Version: []byte{0x40, 0x00, 0x00, 0x00},
+					Epoch:   0,
+					Spec:    &CapellaSpec,
+				},
+				{
+					Version: []byte{0x50, 0x00, 0x00, 0x00},
+					Epoch:   0,
+					Spec:    &DenebSpec,
+				},
+				{
+					Version: []byte{0x60, 0x00, 0x00, 0x00},
+					Epoch:   0,
+					Spec:    &ElectraSpec,
+				},
+				{
+					Version: []byte{0x70, 0x00, 0x00, 0x00},
+					Epoch:   0,
 					Spec:    &FuluSpec,
 				},
 			},

@@ -460,9 +460,28 @@ func (pr *Prover) getForkSpecForSlot(slot uint64) *lctypes.ForkSpec {
 
 // findAttestedSlot finds the first slot after finalizedSlot whose state has finalized the target epoch
 func (pr *Prover) findAttestedSlot(ctx context.Context, targetFinalizedEpoch, finalizedSlot uint64) (uint64, error) {
-	// Start from finalizedSlot + 1 and search forward
+	// First, try to use "head" - if we can get the finalized block, head should already have
+	// the finalized checkpoint since blocks must be attested before finalization
+	headBlock, err := pr.beaconClient.GetBeaconBlock(ctx, "head")
+	if err == nil {
+		headSlot := uint64(headBlock.Data.Message.Slot)
+		headCheckpoints, err := pr.beaconClient.GetFinalityCheckpointsAtState(ctx, "head")
+		if err == nil && headCheckpoints.Finalized.Epoch >= targetFinalizedEpoch {
+			pr.GetLogger().DebugContext(ctx, "using head as attested slot", "slot", headSlot, "finalized_epoch", headCheckpoints.Finalized.Epoch)
+			return headSlot, nil
+		}
+	}
+
+	// Fallback: search forward from finalized slot, checking block existence first
 	for offset := uint64(1); offset <= 32; offset++ {
 		candidateSlot := finalizedSlot + offset
+
+		// First check if a block exists at this slot
+		_, err := pr.beaconClient.GetBeaconBlock(ctx, fmt.Sprintf("%d", candidateSlot))
+		if err != nil {
+			pr.GetLogger().DebugContext(ctx, "no block at slot", "slot", candidateSlot)
+			continue
+		}
 
 		checkpoints, err := pr.beaconClient.GetFinalityCheckpointsAtState(ctx, fmt.Sprintf("%d", candidateSlot))
 		if err != nil {

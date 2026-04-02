@@ -9,11 +9,11 @@ import (
 
 	"github.com/cosmos/cosmos-sdk/codec"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	transfertypes "github.com/cosmos/ibc-go/v8/modules/apps/transfer/types"
 	clienttypes "github.com/cosmos/ibc-go/v8/modules/core/02-client/types"
 	conntypes "github.com/cosmos/ibc-go/v8/modules/core/03-connection/types"
 	chantypes "github.com/cosmos/ibc-go/v8/modules/core/04-channel/types"
 	ibcexported "github.com/cosmos/ibc-go/v8/modules/core/exported"
-	transfertypes "github.com/cosmos/ibc-go/v8/modules/apps/transfer/types"
 	"github.com/datachainlab/ethereum-ibc-relay-prover/beacon"
 	lctypes "github.com/datachainlab/ethereum-ibc-relay-prover/light-clients/ethereum/types"
 	"github.com/hyperledger-labs/yui-relayer/core"
@@ -34,8 +34,8 @@ type mockChain struct{}
 
 func (m *mockChain) ChainID() string                     { return "test-chain" }
 func (m *mockChain) GetAddress() (sdk.AccAddress, error) { return nil, nil }
-func (m *mockChain) Codec() codec.ProtoCodecMarshaler   { return nil }
-func (m *mockChain) Path() *core.PathEnd                { return nil }
+func (m *mockChain) Codec() codec.ProtoCodecMarshaler    { return nil }
+func (m *mockChain) Path() *core.PathEnd                 { return nil }
 func (m *mockChain) Init(string, time.Duration, codec.ProtoCodecMarshaler, bool) error {
 	return nil
 }
@@ -47,8 +47,8 @@ func (m *mockChain) SendMsgs(context.Context, []sdk.Msg) ([]core.MsgID, error) {
 func (m *mockChain) GetMsgResult(context.Context, core.MsgID) (core.MsgResult, error) {
 	return nil, nil
 }
-func (m *mockChain) RegisterMsgEventListener(core.MsgEventListener)            {}
-func (m *mockChain) LatestHeight(context.Context) (ibcexported.Height, error)  { return nil, nil }
+func (m *mockChain) RegisterMsgEventListener(core.MsgEventListener)           {}
+func (m *mockChain) LatestHeight(context.Context) (ibcexported.Height, error) { return nil, nil }
 func (m *mockChain) Timestamp(context.Context, ibcexported.Height) (time.Time, error) {
 	return time.Time{}, nil
 }
@@ -106,7 +106,7 @@ var _ core.Chain = (*mockChain)(nil)
 func getBeaconEndpoint() string {
 	endpoint := os.Getenv("BEACON_ENDPOINT")
 	if endpoint == "" {
-		endpoint = "http://localhost:51903"
+		endpoint = "http://localhost:64593"
 	}
 	return endpoint
 }
@@ -117,9 +117,9 @@ func newTestProver(t *testing.T) *Prover {
 	endpoint := getBeaconEndpoint()
 	beaconClient := beacon.NewClient(endpoint)
 
-	// Create a minimal config for testing
+	// Create a devnet config for testing (mainnet preset with all forks at epoch 0)
 	config := ProverConfig{
-		Network:        "minimal",
+		Network:        "devnet",
 		BeaconEndpoint: endpoint,
 	}
 
@@ -231,11 +231,6 @@ func TestGetSyncCommitteesFromState(t *testing.T) {
 	slot := uint64(block.Data.Message.Slot)
 	version := block.Version
 
-	// Skip Fulu as prysm library doesn't have Fulu SSZ types yet
-	if version == "fulu" {
-		t.Skip("Skipping: Fulu SSZ types not yet supported by prysm library")
-	}
-
 	t.Logf("Testing getSyncCommitteesFromState: slot=%d, version=%s", slot, version)
 
 	currentSC, nextSC, err := pr.getSyncCommitteesFromState(ctx, slot, version)
@@ -272,11 +267,7 @@ func TestBuildConsensusUpdateFromBeaconAPI(t *testing.T) {
 		t.Skipf("Beacon API not available: %v", err)
 	}
 
-	// Skip Fulu as prysm library doesn't have Fulu SSZ types yet
-	if block.Version == "fulu" {
-		t.Skip("Skipping: Fulu SSZ types not yet supported by prysm library")
-	}
-
+	t.Logf("Testing buildConsensusUpdateFromBeaconAPI: version=%s", block.Version)
 	t.Log("Testing buildConsensusUpdateFromBeaconAPI without next sync committee")
 	update, execHeader, err := pr.buildConsensusUpdateFromBeaconAPI(ctx, false)
 	if err != nil {
@@ -306,10 +297,7 @@ func TestBuildConsensusUpdateCore(t *testing.T) {
 		t.Skipf("Beacon API not available: %v", err)
 	}
 
-	// Skip Fulu as prysm library doesn't have Fulu SSZ types yet
-	if block.Version == "fulu" {
-		t.Skip("Skipping: Fulu SSZ types not yet supported by prysm library")
-	}
+	t.Logf("Testing buildConsensusUpdateCore: version=%s", block.Version)
 
 	checkpoints, err := pr.beaconClient.GetFinalityCheckpoints(ctx)
 	if err != nil {
@@ -466,10 +454,7 @@ func TestGetSyncCommitteesInPeriod(t *testing.T) {
 		t.Skipf("Beacon API not available: %v", err)
 	}
 
-	// Skip Fulu as prysm library doesn't have Fulu SSZ types yet
-	if block.Version == "fulu" {
-		t.Skip("Skipping: Fulu SSZ types not yet supported by prysm library")
-	}
+	t.Logf("Testing getSyncCommitteesInPeriod: version=%s", block.Version)
 
 	slot := uint64(block.Data.Message.Slot)
 	epoch := pr.computeEpoch(slot)
@@ -505,10 +490,7 @@ func TestGetBootstrapInPeriod(t *testing.T) {
 		t.Skipf("Beacon API not available: %v", err)
 	}
 
-	// Skip Fulu as prysm library doesn't have Fulu SSZ types yet
-	if block.Version == "fulu" {
-		t.Skip("Skipping: Fulu SSZ types not yet supported by prysm library")
-	}
+	t.Logf("Testing getBootstrapInPeriod: version=%s", block.Version)
 
 	slot := uint64(block.Data.Message.Slot)
 	epoch := pr.computeEpoch(slot)
@@ -535,8 +517,8 @@ func TestGetBootstrapInPeriod(t *testing.T) {
 	}
 }
 
-// TestFuluSSZParsing tests if Fulu SSZ can be parsed with Electra types
-func TestFuluSSZParsing(t *testing.T) {
+// TestSSZParsing tests if SSZ can be parsed correctly
+func TestSSZParsing(t *testing.T) {
 	pr := newTestProver(t)
 	ctx := context.Background()
 
@@ -560,16 +542,37 @@ func TestFuluSSZParsing(t *testing.T) {
 	}
 	t.Logf("Block SSZ size: %d bytes", len(blockSSZ))
 
-	// Try to parse as Electra
+	// Parse block SSZ
 	parsed, err := ParseBeaconBlockSSZ(blockSSZ, block.Version, forkSpec)
 	if err != nil {
-		t.Logf("ParseBeaconBlockSSZ error: %v", err)
-		t.Logf("First 100 bytes: %x", blockSSZ[:min(100, len(blockSSZ))])
-	} else {
-		t.Logf("Successfully parsed block: slot=%d", parsed.Slot)
+		t.Fatalf("ParseBeaconBlockSSZ failed: %v", err)
+	}
+	t.Logf("Successfully parsed block: slot=%d, proposer_index=%d", parsed.Slot, parsed.ProposerIndex)
+
+	// Validate parsed block data
+	if parsed.Slot != slot {
+		t.Errorf("Parsed slot %d doesn't match expected slot %d", parsed.Slot, slot)
+	}
+	if len(parsed.ParentRoot) != 32 {
+		t.Errorf("ParentRoot length should be 32, got %d", len(parsed.ParentRoot))
+	}
+	if len(parsed.StateRoot) != 32 {
+		t.Errorf("StateRoot length should be 32, got %d", len(parsed.StateRoot))
+	}
+	if len(parsed.BodyRoot) != 32 {
+		t.Errorf("BodyRoot length should be 32, got %d", len(parsed.BodyRoot))
+	}
+	if len(parsed.ExecutionRoot) != 32 {
+		t.Errorf("ExecutionRoot length should be 32, got %d", len(parsed.ExecutionRoot))
+	}
+	if parsed.ExecutionPayload == nil {
+		t.Error("ExecutionPayload should not be nil")
+	}
+	if parsed.SyncAggregate == nil {
+		t.Error("SyncAggregate should not be nil")
 	}
 
-	// Also try state
+	// Parse state SSZ
 	stateSSZ, err := pr.beaconClient.GetBeaconStateSSZ(ctx, "finalized")
 	if err != nil {
 		t.Fatalf("Failed to get state SSZ: %v", err)
@@ -578,8 +581,27 @@ func TestFuluSSZParsing(t *testing.T) {
 
 	parsedState, err := ParseBeaconStateSSZ(stateSSZ, block.Version, forkSpec)
 	if err != nil {
-		t.Logf("ParseBeaconStateSSZ error: %v", err)
+		t.Fatalf("ParseBeaconStateSSZ failed: %v", err)
+	}
+	t.Logf("Successfully parsed state, sync committee pubkeys: %d", len(parsedState.SyncCommittee.Pubkeys))
+
+	// Validate parsed state data
+	if parsedState.SyncCommittee == nil {
+		t.Error("SyncCommittee should not be nil")
 	} else {
-		t.Logf("Successfully parsed state, sync committee pubkeys: %d", len(parsedState.SyncCommittee.Pubkeys))
+		// Mainnet preset should have 512 pubkeys
+		if len(parsedState.SyncCommittee.Pubkeys) != 512 {
+			t.Errorf("SyncCommittee should have 512 pubkeys (mainnet), got %d", len(parsedState.SyncCommittee.Pubkeys))
+		}
+		if len(parsedState.SyncCommittee.AggregatePubkey) == 0 {
+			t.Error("SyncCommittee.AggregatePubkey should not be empty")
+		}
+	}
+	if parsedState.NextSyncCommittee == nil {
+		t.Error("NextSyncCommittee should not be nil")
+	} else {
+		if len(parsedState.NextSyncCommittee.Pubkeys) != 512 {
+			t.Errorf("NextSyncCommittee should have 512 pubkeys (mainnet), got %d", len(parsedState.NextSyncCommittee.Pubkeys))
+		}
 	}
 }

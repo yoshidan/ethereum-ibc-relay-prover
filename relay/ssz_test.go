@@ -1,8 +1,30 @@
 package relay
 
 import (
+	"context"
 	"testing"
+
+	"github.com/datachainlab/ethereum-ibc-relay-prover/beacon"
 )
+
+func newTestProverForSSZ(t *testing.T) *Prover {
+	initTestLogger()
+
+	endpoint := getBeaconEndpoint() // Use shared helper from prover_test.go
+	beaconClient := beacon.NewClient(endpoint)
+
+	// Create a devnet config for testing (mainnet preset with all forks at epoch 0)
+	config := ProverConfig{
+		Network:        "devnet",
+		BeaconEndpoint: endpoint,
+	}
+
+	return &Prover{
+		chain:        &mockChain{},
+		config:       config,
+		beaconClient: beaconClient,
+	}
+}
 
 func TestGindexToDepth(t *testing.T) {
 	tests := []struct {
@@ -176,17 +198,108 @@ func TestSyncCommitteeToProto(t *testing.T) {
 }
 
 // TestParsedBeaconStateGenerateBranches tests the proof generation methods
-// Note: These tests are skipped because the current implementation uses SSZ data
-// parsing which requires actual beacon state data from a node.
 func TestParsedBeaconStateGenerateBranches(t *testing.T) {
-	t.Skip("Skipping: Requires actual beacon state SSZ data for proof generation")
+	// This test requires a beacon node to be running
+	// Use the same test helper as prover_test.go
+	pr := newTestProverForSSZ(t)
+	ctx := context.Background()
+
+	// Get finalized block info
+	block, err := pr.beaconClient.GetBeaconBlock(ctx, "finalized")
+	if err != nil {
+		t.Skipf("Beacon API not available: %v", err)
+	}
+
+	slot := uint64(block.Data.Message.Slot)
+	forkSpec := pr.getForkSpecForSlot(slot)
+	if forkSpec == nil {
+		t.Fatalf("getForkSpecForSlot returned nil for slot %d", slot)
+	}
+
+	// Get state SSZ
+	stateSSZ, err := pr.beaconClient.GetBeaconStateSSZ(ctx, "finalized")
+	if err != nil {
+		t.Fatalf("Failed to get state SSZ: %v", err)
+	}
+
+	// Parse state
+	parsedState, err := ParseBeaconStateSSZ(stateSSZ, block.Version, forkSpec)
+	if err != nil {
+		t.Fatalf("Failed to parse state SSZ: %v", err)
+	}
+
+	// Test finality branch generation
+	finalityBranch, err := parsedState.GenerateFinalityBranch()
+	if err != nil {
+		t.Fatalf("GenerateFinalityBranch failed: %v", err)
+	}
+
+	expectedDepth := gindexToDepth(forkSpec.FinalizedRootGindex)
+	if len(finalityBranch) != expectedDepth {
+		t.Errorf("Finality branch has %d elements, expected %d (depth for gindex %d)",
+			len(finalityBranch), expectedDepth, forkSpec.FinalizedRootGindex)
+	}
+
+	t.Logf("Finality branch generated with %d elements for gindex %d", len(finalityBranch), forkSpec.FinalizedRootGindex)
+
+	// Test next sync committee branch generation
+	nextSCBranch, err := parsedState.GenerateNextSyncCommitteeBranch()
+	if err != nil {
+		t.Fatalf("GenerateNextSyncCommitteeBranch failed: %v", err)
+	}
+
+	expectedSCDepth := gindexToDepth(forkSpec.NextSyncCommitteeGindex)
+	if len(nextSCBranch) != expectedSCDepth {
+		t.Errorf("Next sync committee branch has %d elements, expected %d (depth for gindex %d)",
+			len(nextSCBranch), expectedSCDepth, forkSpec.NextSyncCommitteeGindex)
+	}
+
+	t.Logf("Next sync committee branch generated with %d elements for gindex %d", len(nextSCBranch), forkSpec.NextSyncCommitteeGindex)
 }
 
 // TestParsedBeaconBlockGenerateExecutionBranch tests the execution branch generation
-// Note: This test is skipped because the current implementation uses SSZ data
-// parsing which requires actual beacon block data from a node.
 func TestParsedBeaconBlockGenerateExecutionBranch(t *testing.T) {
-	t.Skip("Skipping: Requires actual beacon block SSZ data for proof generation")
+	// This test requires a beacon node to be running
+	pr := newTestProverForSSZ(t)
+	ctx := context.Background()
+
+	// Get finalized block info
+	block, err := pr.beaconClient.GetBeaconBlock(ctx, "finalized")
+	if err != nil {
+		t.Skipf("Beacon API not available: %v", err)
+	}
+
+	slot := uint64(block.Data.Message.Slot)
+	forkSpec := pr.getForkSpecForSlot(slot)
+	if forkSpec == nil {
+		t.Fatalf("getForkSpecForSlot returned nil for slot %d", slot)
+	}
+
+	// Get block SSZ
+	blockSSZ, err := pr.beaconClient.GetBeaconBlockSSZ(ctx, "finalized")
+	if err != nil {
+		t.Fatalf("Failed to get block SSZ: %v", err)
+	}
+
+	// Parse block
+	parsedBlock, err := ParseBeaconBlockSSZ(blockSSZ, block.Version, forkSpec)
+	if err != nil {
+		t.Fatalf("Failed to parse block SSZ: %v", err)
+	}
+
+	// Test execution branch generation
+	executionBranch, err := parsedBlock.GenerateExecutionPayloadBranch()
+	if err != nil {
+		t.Fatalf("GenerateExecutionPayloadBranch failed: %v", err)
+	}
+
+	expectedDepth := gindexToDepth(forkSpec.ExecutionPayloadGindex)
+	if len(executionBranch) != expectedDepth {
+		t.Errorf("Execution branch has %d elements, expected %d (depth for gindex %d)",
+			len(executionBranch), expectedDepth, forkSpec.ExecutionPayloadGindex)
+	}
+
+	t.Logf("Execution branch generated with %d elements for gindex %d", len(executionBranch), forkSpec.ExecutionPayloadGindex)
 }
 
 func TestGenerateMerkleProofEmpty(t *testing.T) {
