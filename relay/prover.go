@@ -1,7 +1,6 @@
 package relay
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -159,21 +158,14 @@ func (pr *Prover) SetupHeadersForUpdate(ctx context.Context, counterparty core.F
 
 	if statePeriod == latestPeriod {
 		latestHeight := cs.GetLatestHeight().(clienttypes.Height)
-		res, err := pr.beaconClient.GetLightClientUpdate(ctx, statePeriod)
+		// Get current sync committee for the period
+		currentSyncCommittee, err := pr.getBootstrapInPeriod(ctx, statePeriod)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get LightClientUpdate: state_period=%v %v", statePeriod, err)
-		}
-		root, err := res.Data.FinalizedHeader.Beacon.HashTreeRoot()
-		if err != nil {
-			return nil, fmt.Errorf("failed to calculate hash tree root: %v", err)
-		}
-		bootstrapRes, err := pr.beaconClient.GetBootstrap(ctx, root[:])
-		if err != nil {
-			return nil, fmt.Errorf("failed to get bootstrap: root=%x %v", root, err)
+			return nil, fmt.Errorf("failed to get bootstrap in period: state_period=%v %v", statePeriod, err)
 		}
 		lfh.TrustedSyncCommittee = &lctypes.TrustedSyncCommittee{
 			TrustedHeight: &latestHeight,
-			SyncCommittee: bootstrapRes.Data.CurrentSyncCommittee.ToProto(),
+			SyncCommittee: currentSyncCommittee,
 			IsNext:        false,
 		}
 		return core.MakeHeaderStream(lfh), nil
@@ -190,11 +182,11 @@ func (pr *Prover) SetupHeadersForUpdate(ctx context.Context, counterparty core.F
 		trustedHeight               = cs.GetLatestHeight().(clienttypes.Height)
 	)
 	pr.GetLogger().DebugContext(ctx, "setup headers for updating the light-client", "state_period", statePeriod, "latest_period", latestPeriod, "client_state_latest_height", cs.GetLatestHeight().GetRevisionHeight())
-	res, err := pr.beaconClient.GetLightClientUpdate(ctx, statePeriod)
+	// Get next sync committee for the state period
+	_, trustedNextSyncCommittee, err = pr.getSyncCommitteesInPeriod(ctx, statePeriod)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get LightClientUpdate: state_period=%v %v", statePeriod, err)
+		return nil, fmt.Errorf("failed to get sync committees in period: state_period=%v %v", statePeriod, err)
 	}
-	trustedNextSyncCommittee = res.Data.ToProto().NextSyncCommittee
 	for p := statePeriod + 1; p <= latestPeriod; p++ {
 		header, err := pr.buildNextSyncCommitteeUpdate(ctx, p, trustedHeight, trustedNextSyncCommittee)
 		if err != nil {
@@ -226,14 +218,18 @@ func (pr *Prover) SetupHeadersForUpdate(ctx context.Context, counterparty core.F
 
 // if `blockNumber` is 0, the latest block number is used
 func (pr *Prover) buildInitialState(ctx context.Context, blockNumber uint64) (*InitialState, error) {
-	res, err := pr.beaconClient.GetLightClientFinalityUpdate(ctx)
+	// 1. Get finalized block to determine block number
+	finalizedBlock, err := pr.beaconClient.GetBeaconBlock(ctx, "finalized")
 	if err != nil {
-		return nil, fmt.Errorf("failed to get light-client finality update: %v", err)
+		return nil, fmt.Errorf("failed to get finalized block: %v", err)
 	}
-	if eh := &res.Data.FinalizedHeader.Execution; blockNumber == 0 {
-		blockNumber = eh.BlockNumber
-	} else if eh.BlockNumber < blockNumber {
-		return nil, fmt.Errorf("the height is not finalized yet: blockNumber=%v finalized_block_number=%v", blockNumber, eh.BlockNumber)
+	finalizedSlot := uint64(finalizedBlock.Data.Message.Slot)
+	finalizedBlockNumber := uint64(finalizedBlock.Data.Message.Body.ExecutionPayload.BlockNumber)
+
+	if blockNumber == 0 {
+		blockNumber = finalizedBlockNumber
+	} else if finalizedBlockNumber < blockNumber {
+		return nil, fmt.Errorf("the height is not finalized yet: blockNumber=%v finalized_block_number=%v", blockNumber, finalizedBlockNumber)
 	}
 
 	timestamp, err := pr.chain.Timestamp(ctx, pr.newHeight(int64(blockNumber)))
@@ -252,25 +248,25 @@ func (pr *Prover) buildInitialState(ctx context.Context, blockNumber uint64) (*I
 	period := pr.computeSyncCommitteePeriod(pr.computeEpoch(slot))
 
 	pr.GetLogger().InfoContext(ctx, "build initial state", "slot", slot, "block_number", blockNumber, "period", period)
-	currentSyncCommittee, err := pr.getBootstrapInPeriod(ctx, period)
+
+	// 2. Get sync committees from state
+	currentSyncCommittee, nextSyncCommittee, err := pr.getSyncCommitteesFromState(ctx, finalizedSlot, finalizedBlock.Version)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get bootstrap in period %v: %v", period, err)
+		return nil, fmt.Errorf("failed to get sync committees from state: %v", err)
 	}
+
 	accountUpdate, err := pr.buildAccountUpdate(ctx, blockNumber)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build account update: %v", err)
 	}
 	var accountStorageRoot [32]byte
 	copy(accountStorageRoot[:], accountUpdate.AccountStorageRoot)
+
 	genesis, err := pr.beaconClient.GetGenesis(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get genesis: %v", err)
 	}
-	res2, err := pr.beaconClient.GetLightClientUpdate(ctx, period)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get LightClientUpdate: period=%v %v", period, err)
-	}
-	nextSyncCommittee := res2.Data.ToProto().NextSyncCommittee
+
 	return &InitialState{
 		Genesis:              *genesis,
 		Slot:                 slot,
@@ -285,22 +281,14 @@ func (pr *Prover) buildInitialState(ctx context.Context, blockNumber uint64) (*I
 // GetLatestFinalizedHeader returns the latest finalized header on this chain
 // The returned header is expected to be the latest one of headers that can be verified by the light client
 func (pr *Prover) GetLatestFinalizedHeader(ctx context.Context) (headers core.Header, err error) {
-	res, err := pr.beaconClient.GetLightClientFinalityUpdate(ctx)
+	lcUpdate, executionHeader, err := pr.buildConsensusUpdateFromBeaconAPI(ctx, false)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to build consensus update: %w", err)
 	}
-	lcUpdate := res.Data.ToProto()
-	executionHeader := &res.Data.FinalizedHeader.Execution
+
 	executionUpdate, err := pr.buildExecutionUpdate(executionHeader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build execution update: %v", err)
-	}
-	executionRoot, err := executionHeader.HashTreeRoot()
-	if err != nil {
-		return nil, fmt.Errorf("failed to calculate execution root: %v", err)
-	}
-	if !bytes.Equal(executionRoot[:], lcUpdate.FinalizedExecutionRoot) {
-		return nil, fmt.Errorf("execution root mismatch: %X != %X", executionRoot, lcUpdate.FinalizedExecutionRoot)
 	}
 
 	accountUpdate, err := pr.buildAccountUpdate(ctx, executionHeader.BlockNumber)
@@ -396,53 +384,30 @@ func (pr *Prover) buildClientState(
 }
 
 func (pr *Prover) getBootstrapInPeriod(ctx context.Context, period uint64) (*lctypes.SyncCommittee, error) {
-	slotsPerEpoch := pr.slotsPerEpoch()
-	startSlot := pr.getPeriodBoundarySlot(period)
-	lastSlotInPeriod := pr.getPeriodBoundarySlot(period+1) - 1
-	pr.GetLogger().DebugContext(ctx, "get bootstrap in period", "period", period, "start_slot", startSlot, "last_slot_in_period", lastSlotInPeriod, "slots_per_epoch", slotsPerEpoch)
-	var errs []error
-	for i := startSlot + slotsPerEpoch; i <= lastSlotInPeriod; i += slotsPerEpoch {
-		res, err := pr.beaconClient.GetBlockRoot(ctx, i, false)
-		if err != nil {
-			pr.GetLogger().WarnContext(ctx, "failed to get block root", "slot", i, "err", err)
-			errs = append(errs, err)
-			return nil, fmt.Errorf("there is no available bootstrap in period: period=%v err=%v", period, errors.Join(errs...))
-		}
-		bootstrap, err := pr.beaconClient.GetBootstrap(ctx, res.Data.Root[:])
-		if err != nil {
-			pr.GetLogger().WarnContext(ctx, "failed to get bootstrap", "root", res.Data.Root[:], "err", err)
-			errs = append(errs, err)
-			continue
-		} else {
-			return bootstrap.Data.CurrentSyncCommittee.ToProto(), nil
-		}
+	currentSyncCommittee, _, err := pr.getSyncCommitteesInPeriod(ctx, period)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get bootstrap in period: %w", err)
 	}
-	return nil, fmt.Errorf("failed to get bootstrap in period: period=%v err=%v", period, errors.Join(errs...))
+	return currentSyncCommittee, nil
 }
 
 func (pr *Prover) buildNextSyncCommitteeUpdate(ctx context.Context, period uint64, trustedHeight clienttypes.Height, trustedNextSyncCommittee *lctypes.SyncCommittee) (*lctypes.Header, error) {
-	res, err := pr.beaconClient.GetLightClientUpdate(ctx, period)
+	// Build consensus update with next_sync_committee using standard Beacon API
+	lcUpdate, executionHeader, err := pr.buildConsensusUpdateForPeriod(ctx, period)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to build consensus update for period %d: %w", period, err)
 	}
-	lcUpdate := res.Data.ToProto()
-	executionHeader := &res.Data.FinalizedHeader.Execution
+
 	executionUpdate, err := pr.buildExecutionUpdate(executionHeader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build execution update: %v", err)
-	}
-	executionRoot, err := executionHeader.HashTreeRoot()
-	if err != nil {
-		return nil, fmt.Errorf("failed to calculate execution root: %v", err)
-	}
-	if !bytes.Equal(executionRoot[:], lcUpdate.FinalizedExecutionRoot) {
-		return nil, fmt.Errorf("execution root mismatch: %X != %X", executionRoot, lcUpdate.FinalizedExecutionRoot)
 	}
 
 	accountUpdate, err := pr.buildAccountUpdate(ctx, executionHeader.BlockNumber)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build account update: %v", err)
 	}
+
 	return &lctypes.Header{
 		TrustedSyncCommittee: &lctypes.TrustedSyncCommittee{
 			TrustedHeight: &trustedHeight,
@@ -476,4 +441,275 @@ func (pr *Prover) ProveHostConsensusState(ctx core.QueryContext, height ibcexpor
 
 func (pr *Prover) newHeight(blockNumber int64) clienttypes.Height {
 	return clienttypes.NewHeight(0, uint64(blockNumber))
+}
+
+// getForkSpecForSlot returns the ForkSpec applicable for the given slot
+func (pr *Prover) getForkSpecForSlot(slot uint64) *lctypes.ForkSpec {
+	epoch := pr.computeEpoch(slot)
+	forkParams := pr.config.getForkParameters()
+
+	// Find the applicable fork (latest fork with epoch <= current epoch)
+	var spec *lctypes.ForkSpec
+	for _, fork := range forkParams.Forks {
+		if fork.Epoch <= epoch {
+			spec = fork.Spec
+		}
+	}
+	return spec
+}
+
+// findAttestedSlot finds the first slot after finalizedSlot whose state has finalized the target epoch
+func (pr *Prover) findAttestedSlot(ctx context.Context, targetFinalizedEpoch, finalizedSlot uint64) (uint64, error) {
+	// Start from finalizedSlot + 1 and search forward
+	for offset := uint64(1); offset <= 32; offset++ {
+		candidateSlot := finalizedSlot + offset
+
+		checkpoints, err := pr.beaconClient.GetFinalityCheckpointsAtState(ctx, fmt.Sprintf("%d", candidateSlot))
+		if err != nil {
+			pr.GetLogger().DebugContext(ctx, "failed to get finality checkpoints", "slot", candidateSlot, "err", err)
+			continue
+		}
+
+		if checkpoints.Finalized.Epoch >= targetFinalizedEpoch {
+			pr.GetLogger().DebugContext(ctx, "found attested slot", "slot", candidateSlot, "finalized_epoch", checkpoints.Finalized.Epoch)
+			return candidateSlot, nil
+		}
+	}
+	return 0, fmt.Errorf("attested slot not found for finalized epoch %d after slot %d", targetFinalizedEpoch, finalizedSlot)
+}
+
+// buildConsensusUpdateFromBeaconAPI builds ConsensusUpdate using standard Beacon API
+func (pr *Prover) buildConsensusUpdateFromBeaconAPI(ctx context.Context, includeNextSyncCommittee bool) (*lctypes.ConsensusUpdate, *beacon.ExecutionPayloadHeader, error) {
+	// 1. Get finality checkpoints
+	checkpoints, err := pr.beaconClient.GetFinalityCheckpoints(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get finality checkpoints: %w", err)
+	}
+	finalizedEpoch := checkpoints.Finalized.Epoch
+
+	// 2. Get finalized block
+	finalizedBlock, err := pr.beaconClient.GetBeaconBlock(ctx, "finalized")
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get finalized block: %w", err)
+	}
+	finalizedSlot := uint64(finalizedBlock.Data.Message.Slot)
+	pr.GetLogger().DebugContext(ctx, "got finalized block", "slot", finalizedSlot, "version", finalizedBlock.Version)
+
+	// 3. Find attested slot
+	attestedSlot, err := pr.findAttestedSlot(ctx, finalizedEpoch, finalizedSlot)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to find attested slot: %w", err)
+	}
+
+	// 4. Build consensus update using the common helper
+	return pr.buildConsensusUpdateCore(ctx, attestedSlot, "finalized", finalizedBlock.Version, includeNextSyncCommittee)
+}
+
+// getSyncCommitteesFromState retrieves current and next sync committees from beacon state
+func (pr *Prover) getSyncCommitteesFromState(ctx context.Context, slot uint64, version string) (*lctypes.SyncCommittee, *lctypes.SyncCommittee, error) {
+	forkSpec := pr.getForkSpecForSlot(slot)
+	if forkSpec == nil {
+		return nil, nil, fmt.Errorf("no fork spec found for slot %d", slot)
+	}
+
+	stateSSZ, err := pr.beaconClient.GetBeaconStateSSZ(ctx, fmt.Sprintf("%d", slot))
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get beacon state SSZ: %w", err)
+	}
+
+	parsedState, err := ParseBeaconStateSSZ(stateSSZ, version, forkSpec)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse beacon state SSZ: %w", err)
+	}
+
+	return parsedState.SyncCommittee, parsedState.NextSyncCommittee, nil
+}
+
+// buildConsensusUpdateForPeriod builds a ConsensusUpdate for a specific period with next_sync_committee
+func (pr *Prover) buildConsensusUpdateForPeriod(ctx context.Context, period uint64) (*lctypes.ConsensusUpdate, *beacon.ExecutionPayloadHeader, error) {
+	// Get finalized block to determine current state
+	finalizedBlock, err := pr.beaconClient.GetBeaconBlock(ctx, "finalized")
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get finalized block: %w", err)
+	}
+	finalizedSlot := uint64(finalizedBlock.Data.Message.Slot)
+	finalizedPeriod := pr.computeSyncCommitteePeriod(pr.computeEpoch(finalizedSlot))
+
+	// Determine the target slot for this period
+	var targetSlot uint64
+	if period < finalizedPeriod {
+		// For past periods, use the last slot of the period
+		targetSlot = pr.getPeriodBoundarySlot(period+1) - 1
+	} else {
+		// For current period, use the finalized slot
+		targetSlot = finalizedSlot
+	}
+
+	pr.GetLogger().DebugContext(ctx, "building consensus update for period", "period", period, "target_slot", targetSlot, "finalized_period", finalizedPeriod)
+
+	// Find a valid block in the target slot range
+	blockSlot, err := pr.findValidBlockSlot(ctx, targetSlot)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to find valid block slot: %w", err)
+	}
+
+	// Get block details for version
+	block, err := pr.beaconClient.GetBeaconBlock(ctx, fmt.Sprintf("%d", blockSlot))
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get block at slot %d: %w", blockSlot, err)
+	}
+
+	// Get finality checkpoints to determine finalized epoch
+	checkpoints, err := pr.beaconClient.GetFinalityCheckpointsAtState(ctx, fmt.Sprintf("%d", blockSlot))
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get finality checkpoints at slot %d: %w", blockSlot, err)
+	}
+	finalizedEpoch := checkpoints.Finalized.Epoch
+
+	// Find attested slot
+	attestedSlot, err := pr.findAttestedSlot(ctx, finalizedEpoch, blockSlot)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to find attested slot: %w", err)
+	}
+
+	// Build consensus update using the common helper
+	return pr.buildConsensusUpdateCore(ctx, attestedSlot, fmt.Sprintf("%d", blockSlot), block.Version, true)
+}
+
+// buildConsensusUpdateCore is the common implementation for building ConsensusUpdate
+func (pr *Prover) buildConsensusUpdateCore(ctx context.Context, attestedSlot uint64, finalizedBlockId string, version string, includeNextSyncCommittee bool) (*lctypes.ConsensusUpdate, *beacon.ExecutionPayloadHeader, error) {
+	forkSpec := pr.getForkSpecForSlot(attestedSlot)
+	if forkSpec == nil {
+		return nil, nil, fmt.Errorf("no fork spec found for slot %d", attestedSlot)
+	}
+
+	// Get attested block SSZ
+	attestedBlockSSZ, err := pr.beaconClient.GetBeaconBlockSSZ(ctx, fmt.Sprintf("%d", attestedSlot))
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get attested block SSZ: %w", err)
+	}
+
+	parsedAttestedBlock, err := ParseBeaconBlockSSZ(attestedBlockSSZ, version, forkSpec)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse attested block SSZ: %w", err)
+	}
+
+	// Get attested state SSZ for finality_branch generation
+	attestedStateSSZ, err := pr.beaconClient.GetBeaconStateSSZ(ctx, fmt.Sprintf("%d", attestedSlot))
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get attested state SSZ: %w", err)
+	}
+
+	parsedState, err := ParseBeaconStateSSZ(attestedStateSSZ, version, forkSpec)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse attested state SSZ: %w", err)
+	}
+
+	finalityBranch, err := parsedState.GenerateFinalityBranch()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to generate finality branch: %w", err)
+	}
+
+	// Get finalized block SSZ for execution_branch generation
+	finalizedBlockSSZ, err := pr.beaconClient.GetBeaconBlockSSZ(ctx, finalizedBlockId)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get finalized block SSZ: %w", err)
+	}
+
+	parsedFinalizedBlock, err := ParseBeaconBlockSSZ(finalizedBlockSSZ, version, forkSpec)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse finalized block SSZ: %w", err)
+	}
+
+	executionBranch, err := parsedFinalizedBlock.GenerateExecutionPayloadBranch()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to generate execution branch: %w", err)
+	}
+
+	// Build ConsensusUpdate
+	update := &lctypes.ConsensusUpdate{
+		AttestedHeader: &lctypes.BeaconBlockHeader{
+			Slot:          parsedAttestedBlock.Slot,
+			ProposerIndex: parsedAttestedBlock.ProposerIndex,
+			ParentRoot:    parsedAttestedBlock.ParentRoot,
+			StateRoot:     parsedAttestedBlock.StateRoot,
+			BodyRoot:      parsedAttestedBlock.BodyRoot,
+		},
+		FinalizedHeader: &lctypes.BeaconBlockHeader{
+			Slot:          parsedFinalizedBlock.Slot,
+			ProposerIndex: parsedFinalizedBlock.ProposerIndex,
+			ParentRoot:    parsedFinalizedBlock.ParentRoot,
+			StateRoot:     parsedFinalizedBlock.StateRoot,
+			BodyRoot:      parsedFinalizedBlock.BodyRoot,
+		},
+		FinalizedHeaderBranch:    finalityBranch,
+		FinalizedExecutionRoot:   parsedFinalizedBlock.ExecutionRoot,
+		FinalizedExecutionBranch: executionBranch,
+		SyncAggregate:            parsedAttestedBlock.SyncAggregate,
+		SignatureSlot:            attestedSlot,
+	}
+
+	// Optionally add next sync committee
+	if includeNextSyncCommittee {
+		update.NextSyncCommittee = parsedState.NextSyncCommittee
+		nextSyncCommitteeBranch, err := parsedState.GenerateNextSyncCommitteeBranch()
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to generate next sync committee branch: %w", err)
+		}
+		update.NextSyncCommitteeBranch = nextSyncCommitteeBranch
+	}
+
+	return update, parsedFinalizedBlock.ExecutionPayload, nil
+}
+
+// findValidBlockSlot finds a valid block slot at or before the target slot
+func (pr *Prover) findValidBlockSlot(ctx context.Context, targetSlot uint64) (uint64, error) {
+	// Try the target slot first
+	_, err := pr.beaconClient.GetBeaconBlock(ctx, fmt.Sprintf("%d", targetSlot))
+	if err == nil {
+		return targetSlot, nil
+	}
+
+	// Search backward for a valid block
+	for offset := uint64(1); offset <= 32; offset++ {
+		if targetSlot < offset {
+			break
+		}
+		candidateSlot := targetSlot - offset
+		_, err := pr.beaconClient.GetBeaconBlock(ctx, fmt.Sprintf("%d", candidateSlot))
+		if err == nil {
+			return candidateSlot, nil
+		}
+	}
+
+	return 0, fmt.Errorf("no valid block found near slot %d", targetSlot)
+}
+
+// getSyncCommitteesInPeriod retrieves current and next sync committees for a specific period
+func (pr *Prover) getSyncCommitteesInPeriod(ctx context.Context, period uint64) (*lctypes.SyncCommittee, *lctypes.SyncCommittee, error) {
+	slotsPerEpoch := pr.slotsPerEpoch()
+	startSlot := pr.getPeriodBoundarySlot(period)
+	lastSlotInPeriod := pr.getPeriodBoundarySlot(period+1) - 1
+	pr.GetLogger().DebugContext(ctx, "get sync committees in period", "period", period, "start_slot", startSlot, "last_slot_in_period", lastSlotInPeriod)
+
+	var errs []error
+	for i := startSlot + slotsPerEpoch; i <= lastSlotInPeriod; i += slotsPerEpoch {
+		// Try to get block at this slot to determine version
+		block, err := pr.beaconClient.GetBeaconBlock(ctx, fmt.Sprintf("%d", i))
+		if err != nil {
+			pr.GetLogger().DebugContext(ctx, "failed to get block", "slot", i, "err", err)
+			errs = append(errs, err)
+			continue
+		}
+
+		// Get sync committees from state
+		currentSyncCommittee, nextSyncCommittee, err := pr.getSyncCommitteesFromState(ctx, i, block.Version)
+		if err != nil {
+			pr.GetLogger().WarnContext(ctx, "failed to get sync committees from state", "slot", i, "err", err)
+			errs = append(errs, err)
+			continue
+		}
+		return currentSyncCommittee, nextSyncCommittee, nil
+	}
+	return nil, nil, fmt.Errorf("failed to get sync committees in period: period=%v err=%v", period, errors.Join(errs...))
 }

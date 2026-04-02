@@ -4,13 +4,20 @@ import (
 	"encoding/json"
 	"strconv"
 
+	"github.com/OffchainLabs/prysm/v7/api/client/builder"
+	"github.com/OffchainLabs/prysm/v7/api/server/structs"
+	"github.com/OffchainLabs/prysm/v7/consensus-types/primitives"
 	"github.com/ethereum/go-ethereum/common/hexutil"
-	"github.com/prysmaticlabs/prysm/v5/api/client/builder"
-	"github.com/prysmaticlabs/prysm/v5/api/server/structs"
-	"github.com/prysmaticlabs/prysm/v5/consensus-types/primitives"
-	enginev1 "github.com/prysmaticlabs/prysm/v5/proto/engine/v1"
-	types "github.com/prysmaticlabs/prysm/v5/validator/keymanager/remote-web3signer/v1"
 )
+
+// beaconBlockHeaderJSON is used for JSON unmarshaling of beacon block headers
+type beaconBlockHeaderJSON struct {
+	Slot          string        `json:"slot"`
+	ProposerIndex string        `json:"proposer_index"`
+	ParentRoot    hexutil.Bytes `json:"parent_root"`
+	StateRoot     hexutil.Bytes `json:"state_root"`
+	BodyRoot      hexutil.Bytes `json:"body_root"`
+}
 
 // Primitives
 
@@ -35,9 +42,9 @@ type LightClientHeader struct {
 
 func (h *LightClientHeader) UnmarshalJSON(bz []byte) error {
 	type LightClientHeaderJSON struct {
-		Beacon          types.BeaconBlockHeader             `json:"beacon"`
-		Execution       builder.ExecutionPayloadHeaderDeneb `json:"execution"`
-		ExecutionBranch []hexutil.Bytes                     `json:"execution_branch"`
+		Beacon          beaconBlockHeaderJSON            `json:"beacon"`
+		Execution       structs.ExecutionPayloadHeaderDeneb `json:"execution"`
+		ExecutionBranch []hexutil.Bytes                  `json:"execution_branch"`
 	}
 
 	var hj LightClientHeaderJSON
@@ -52,6 +59,13 @@ func (h *LightClientHeader) UnmarshalJSON(bz []byte) error {
 	if err != nil {
 		return err
 	}
+
+	// Convert structs.ExecutionPayloadHeaderDeneb to ExecutionPayloadHeader
+	execution, err := hj.Execution.ToConsensus()
+	if err != nil {
+		return err
+	}
+
 	*h = LightClientHeader{
 		Beacon: BeaconBlockHeader{
 			Slot:          primitives.Slot(slot),
@@ -60,25 +74,7 @@ func (h *LightClientHeader) UnmarshalJSON(bz []byte) error {
 			StateRoot:     hj.Beacon.StateRoot,
 			BodyRoot:      hj.Beacon.BodyRoot,
 		},
-		Execution: enginev1.ExecutionPayloadHeaderDeneb{
-			ParentHash:       hj.Execution.ParentHash,
-			FeeRecipient:     hj.Execution.FeeRecipient,
-			StateRoot:        hj.Execution.StateRoot,
-			ReceiptsRoot:     hj.Execution.ReceiptsRoot,
-			LogsBloom:        hj.Execution.LogsBloom,
-			PrevRandao:       hj.Execution.PrevRandao,
-			BlockNumber:      uint64(hj.Execution.BlockNumber),
-			GasLimit:         uint64(hj.Execution.GasLimit),
-			GasUsed:          uint64(hj.Execution.GasUsed),
-			Timestamp:        uint64(hj.Execution.Timestamp),
-			ExtraData:        hj.Execution.ExtraData,
-			BaseFeePerGas:    hj.Execution.BaseFeePerGas.SSZBytes(),
-			BlockHash:        hj.Execution.BlockHash,
-			TransactionsRoot: hj.Execution.TransactionsRoot,
-			WithdrawalsRoot:  hj.Execution.WithdrawalsRoot,
-			BlobGasUsed:      uint64(hj.Execution.BlobGasUsed),
-			ExcessBlobGas:    uint64(hj.Execution.ExcessBlobGas),
-		},
+		Execution:       *execution,
 		ExecutionBranch: hj.ExecutionBranch,
 	}
 	return nil
@@ -135,4 +131,71 @@ type SyncAggregate struct {
 type SyncCommittee struct {
 	PubKeys         []hexutil.Bytes `json:"pubkeys"`
 	AggregatePubKey hexutil.Bytes   `json:"aggregate_pubkey"`
+}
+
+// BeaconBlockResponse is the response from GET /eth/v2/beacon/blocks/{block_id}
+type BeaconBlockResponse struct {
+	Version             string          `json:"version"`
+	ExecutionOptimistic bool            `json:"execution_optimistic"`
+	Finalized           bool            `json:"finalized"`
+	Data                BeaconBlockData `json:"data"`
+}
+
+type BeaconBlockData struct {
+	Message   BeaconBlockMessage `json:"message"`
+	Signature hexutil.Bytes      `json:"signature"`
+}
+
+type BeaconBlockMessage struct {
+	Slot          Uint64              `json:"slot"`
+	ProposerIndex Uint64              `json:"proposer_index"`
+	ParentRoot    hexutil.Bytes       `json:"parent_root"`
+	StateRoot     hexutil.Bytes       `json:"state_root"`
+	Body          BeaconBlockBodyJSON `json:"body"`
+}
+
+type BeaconBlockBodyJSON struct {
+	RandaoReveal      hexutil.Bytes        `json:"randao_reveal"`
+	Eth1Data          Eth1DataJSON         `json:"eth1_data"`
+	Graffiti          hexutil.Bytes        `json:"graffiti"`
+	SyncAggregate     SyncAggregate        `json:"sync_aggregate"`
+	ExecutionPayload  ExecutionPayloadJSON `json:"execution_payload"`
+}
+
+type Eth1DataJSON struct {
+	DepositRoot  hexutil.Bytes `json:"deposit_root"`
+	DepositCount Uint64        `json:"deposit_count"`
+	BlockHash    hexutil.Bytes `json:"block_hash"`
+}
+
+type ExecutionPayloadJSON struct {
+	ParentHash       hexutil.Bytes `json:"parent_hash"`
+	FeeRecipient     hexutil.Bytes `json:"fee_recipient"`
+	StateRoot        hexutil.Bytes `json:"state_root"`
+	ReceiptsRoot     hexutil.Bytes `json:"receipts_root"`
+	LogsBloom        hexutil.Bytes `json:"logs_bloom"`
+	PrevRandao       hexutil.Bytes `json:"prev_randao"`
+	BlockNumber      Uint64        `json:"block_number"`
+	GasLimit         Uint64        `json:"gas_limit"`
+	GasUsed          Uint64        `json:"gas_used"`
+	Timestamp        Uint64        `json:"timestamp"`
+	ExtraData        hexutil.Bytes `json:"extra_data"`
+	BaseFeePerGas    Uint64        `json:"base_fee_per_gas"`
+	BlockHash        hexutil.Bytes `json:"block_hash"`
+	TransactionsRoot hexutil.Bytes `json:"transactions_root"`
+	WithdrawalsRoot  hexutil.Bytes `json:"withdrawals_root"`
+	BlobGasUsed      Uint64        `json:"blob_gas_used"`
+	ExcessBlobGas    Uint64        `json:"excess_blob_gas"`
+}
+
+// SyncCommitteesResponse is the response from GET /eth/v1/beacon/states/{state_id}/sync_committees
+type SyncCommitteesResponse struct {
+	ExecutionOptimistic bool                   `json:"execution_optimistic"`
+	Finalized           bool                   `json:"finalized"`
+	Data                SyncCommitteesDataJSON `json:"data"`
+}
+
+type SyncCommitteesDataJSON struct {
+	Validators          []string   `json:"validators"`
+	ValidatorAggregates [][]string `json:"validator_aggregates"`
 }

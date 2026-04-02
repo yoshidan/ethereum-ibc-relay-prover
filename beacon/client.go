@@ -107,6 +107,46 @@ func (cl Client) GetLightClientFinalityUpdate(ctx context.Context) (*LightClient
 	return &res, nil
 }
 
+// GetBeaconBlock retrieves a beacon block by block_id (slot number, "head", "finalized", etc.)
+func (cl Client) GetBeaconBlock(ctx context.Context, blockId string) (*BeaconBlockResponse, error) {
+	var res BeaconBlockResponse
+	if err := cl.get(ctx, fmt.Sprintf("/eth/v2/beacon/blocks/%s", blockId), &res); err != nil {
+		return nil, err
+	}
+	if !IsSupportedVersion(res.Version) {
+		return nil, fmt.Errorf("unsupported version: %v", res.Version)
+	}
+	return &res, nil
+}
+
+// GetBeaconBlockSSZ retrieves a beacon block in SSZ format
+func (cl Client) GetBeaconBlockSSZ(ctx context.Context, blockId string) ([]byte, error) {
+	return cl.getSSZ(ctx, fmt.Sprintf("/eth/v2/beacon/blocks/%s", blockId))
+}
+
+// GetBeaconStateSSZ retrieves a beacon state in SSZ format
+func (cl Client) GetBeaconStateSSZ(ctx context.Context, stateId string) ([]byte, error) {
+	return cl.getSSZ(ctx, fmt.Sprintf("/eth/v2/debug/beacon/states/%s", stateId))
+}
+
+// GetFinalityCheckpointsAtState retrieves finality checkpoints for a specific state
+func (cl Client) GetFinalityCheckpointsAtState(ctx context.Context, stateId string) (*StateFinalityCheckpoints, error) {
+	var res StateFinalityCheckpointResponse
+	if err := cl.get(ctx, fmt.Sprintf("/eth/v1/beacon/states/%s/finality_checkpoints", stateId), &res); err != nil {
+		return nil, err
+	}
+	return ToStateFinalityCheckpoints(res)
+}
+
+// GetSyncCommittees retrieves the sync committees for a state
+func (cl Client) GetSyncCommittees(ctx context.Context, stateId string) (*SyncCommitteesResponse, error) {
+	var res SyncCommitteesResponse
+	if err := cl.get(ctx, fmt.Sprintf("/eth/v1/beacon/states/%s/sync_committees", stateId), &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
 func (cl Client) get(ctx context.Context, path string, res any) error {
 	log.GetLogger().DebugContext(ctx, "Beacon API request", "endpoint", cl.endpoint+path)
 	req, err := http.NewRequestWithContext(ctx, "GET", cl.endpoint+path, nil)
@@ -128,4 +168,28 @@ func (cl Client) get(ctx context.Context, path string, res any) error {
 		return fmt.Errorf("request returned status code %d", r.StatusCode)
 	}
 	return json.Unmarshal(bz, &res)
+}
+
+func (cl Client) getSSZ(ctx context.Context, path string) ([]byte, error) {
+	log.GetLogger().DebugContext(ctx, "Beacon API SSZ request", "endpoint", cl.endpoint+path)
+	req, err := http.NewRequestWithContext(ctx, "GET", cl.endpoint+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/octet-stream")
+
+	r, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Body.Close()
+	bz, err := io.ReadAll(r.Body)
+	if err != nil {
+		return nil, err
+	}
+	if r.StatusCode < 200 || r.StatusCode >= 300 {
+		log.GetLogger().DebugContext(ctx, "Non 2xx response to Beacon API SSZ request", "endpoint", cl.endpoint+path, "status code", r.StatusCode)
+		return nil, fmt.Errorf("request returned status code %d", r.StatusCode)
+	}
+	return bz, nil
 }
