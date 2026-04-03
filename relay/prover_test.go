@@ -107,7 +107,7 @@ var _ core.Chain = (*mockChain)(nil)
 func getBeaconEndpoint() string {
 	endpoint := os.Getenv("BEACON_ENDPOINT")
 	if endpoint == "" {
-		endpoint = "http://localhost:64593"
+		endpoint = "http://localhost:59796"
 	}
 	return endpoint
 }
@@ -120,7 +120,7 @@ func newTestProver(t *testing.T) *Prover {
 
 	// Create a devnet config for testing (mainnet preset with all forks at epoch 0)
 	config := ProverConfig{
-		Network:        "devnet",
+		Network:        "kurtosis_minimal",
 		BeaconEndpoint: endpoint,
 	}
 
@@ -196,13 +196,27 @@ func TestFindSignatureAndAttestedSlot(t *testing.T) {
 		t.Skipf("Beacon API not available: %v", err)
 	}
 
+	// Get head block to check if chain has enough blocks
+	headBlock, err := pr.beaconClient.GetBeaconBlock(ctx, "head")
+	if err != nil {
+		t.Fatalf("Failed to get head block: %v", err)
+	}
+
+	finalizedSlot := uint64(block.Data.Message.Slot)
+	headSlot := uint64(headBlock.Data.Message.Slot)
+
+	// Need at least 2 slots after finalized for attested and signature blocks
+	// Attested slot is typically finalized + 1 epoch (8 slots for minimal)
+	// Signature slot is attested + 1
+	if headSlot < finalizedSlot+17 {
+		t.Skipf("Chain head (%d) is too close to finalized slot (%d), need more blocks for signature", headSlot, finalizedSlot)
+	}
+
 	// Get finalized block root
 	finalizedBlockRoot, err := pr.beaconClient.GetBlockRootByID(ctx, "finalized", true)
 	if err != nil {
 		t.Fatalf("Failed to get finalized block root: %v", err)
 	}
-
-	finalizedSlot := uint64(block.Data.Message.Slot)
 
 	t.Logf("Testing findSignatureAndAttestedSlot: finalized_slot=%d, finalized_root=%s",
 		finalizedSlot, finalizedBlockRoot.Data.Root.String())
@@ -300,6 +314,20 @@ func TestBuildConsensusUpdateFromBeaconAPI(t *testing.T) {
 		t.Skipf("Beacon API not available: %v", err)
 	}
 
+	// Get head block to check if chain has enough blocks
+	headBlock, err := pr.beaconClient.GetBeaconBlock(ctx, "head")
+	if err != nil {
+		t.Fatalf("Failed to get head block: %v", err)
+	}
+
+	finalizedSlot := uint64(block.Data.Message.Slot)
+	headSlot := uint64(headBlock.Data.Message.Slot)
+
+	// Need enough blocks after finalized for attested and signature blocks
+	if headSlot < finalizedSlot+17 {
+		t.Skipf("Chain head (%d) is too close to finalized slot (%d), need more blocks", headSlot, finalizedSlot)
+	}
+
 	t.Logf("Testing buildConsensusUpdateFromBeaconAPI: version=%s", block.Version)
 	t.Log("Testing buildConsensusUpdateFromBeaconAPI without next sync committee")
 	update, execHeader, err := pr.buildConsensusUpdateFromBeaconAPI(ctx, false)
@@ -330,6 +358,20 @@ func TestBuildConsensusUpdateWithSlots(t *testing.T) {
 		t.Skipf("Beacon API not available: %v", err)
 	}
 
+	// Get head block to check if chain has enough blocks
+	headBlock, err := pr.beaconClient.GetBeaconBlock(ctx, "head")
+	if err != nil {
+		t.Fatalf("Failed to get head block: %v", err)
+	}
+
+	finalizedSlot := uint64(block.Data.Message.Slot)
+	headSlot := uint64(headBlock.Data.Message.Slot)
+
+	// Need enough blocks after finalized for attested and signature blocks
+	if headSlot < finalizedSlot+17 {
+		t.Skipf("Chain head (%d) is too close to finalized slot (%d), need more blocks", headSlot, finalizedSlot)
+	}
+
 	t.Logf("Testing buildConsensusUpdateWithSlots: version=%s", block.Version)
 
 	// Get finalized block root
@@ -337,8 +379,6 @@ func TestBuildConsensusUpdateWithSlots(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get finalized block root: %v", err)
 	}
-
-	finalizedSlot := uint64(block.Data.Message.Slot)
 
 	// Find signature and attested slots
 	signatureSlot, attestedSlot, err := pr.findSignatureAndAttestedSlot(ctx, finalizedBlockRoot.Data.Root, finalizedSlot)
@@ -619,12 +659,16 @@ func TestSSZParsing(t *testing.T) {
 	t.Logf("Successfully parsed state, sync committee pubkeys: %d", len(parsedState.SyncCommittee.Pubkeys))
 
 	// Validate parsed state data
+	expectedCommitteeSize := MAINNET_PRESET_SYNC_COMMITTEE_SIZE
+	if !pr.config.IsMainnetPreset() {
+		expectedCommitteeSize = MINIMAL_PRESET_SYNC_COMMITTEE_SIZE
+	}
+
 	if parsedState.SyncCommittee == nil {
 		t.Error("SyncCommittee should not be nil")
 	} else {
-		// Mainnet preset should have 512 pubkeys
-		if len(parsedState.SyncCommittee.Pubkeys) != 512 {
-			t.Errorf("SyncCommittee should have 512 pubkeys (mainnet), got %d", len(parsedState.SyncCommittee.Pubkeys))
+		if len(parsedState.SyncCommittee.Pubkeys) != expectedCommitteeSize {
+			t.Errorf("SyncCommittee should have %d pubkeys, got %d", expectedCommitteeSize, len(parsedState.SyncCommittee.Pubkeys))
 		}
 		if len(parsedState.SyncCommittee.AggregatePubkey) == 0 {
 			t.Error("SyncCommittee.AggregatePubkey should not be empty")
@@ -633,8 +677,8 @@ func TestSSZParsing(t *testing.T) {
 	if parsedState.NextSyncCommittee == nil {
 		t.Error("NextSyncCommittee should not be nil")
 	} else {
-		if len(parsedState.NextSyncCommittee.Pubkeys) != 512 {
-			t.Errorf("NextSyncCommittee should have 512 pubkeys (mainnet), got %d", len(parsedState.NextSyncCommittee.Pubkeys))
+		if len(parsedState.NextSyncCommittee.Pubkeys) != expectedCommitteeSize {
+			t.Errorf("NextSyncCommittee should have %d pubkeys, got %d", expectedCommitteeSize, len(parsedState.NextSyncCommittee.Pubkeys))
 		}
 	}
 }

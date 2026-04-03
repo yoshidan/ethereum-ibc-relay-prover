@@ -3,26 +3,16 @@ package relay
 import (
 	"context"
 	"testing"
-
-	"github.com/datachainlab/ethereum-ibc-relay-prover/beacon"
 )
 
 func newTestProverForSSZ(t *testing.T) *Prover {
 	initTestLogger()
 
-	endpoint := getBeaconEndpoint() // Use shared helper from prover_test.go
-	beaconClient := beacon.NewClient(endpoint)
-
 	// Create a devnet config for testing (mainnet preset with all forks at epoch 0)
-	config := ProverConfig{
-		Network:        "devnet",
-		BeaconEndpoint: endpoint,
-	}
-
+	config := ProverConfig{}
 	return &Prover{
-		chain:        &mockChain{},
-		config:       config,
-		beaconClient: beaconClient,
+		chain:  &mockChain{},
+		config: config,
 	}
 }
 
