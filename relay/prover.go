@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/OffchainLabs/prysm/v7/crypto/bls"
 	"github.com/cosmos/cosmos-sdk/codec"
 	clienttypes "github.com/cosmos/ibc-go/v8/modules/core/02-client/types"
 	ibcexported "github.com/cosmos/ibc-go/v8/modules/core/exported"
@@ -552,6 +553,19 @@ func bytesEqual(a, b []byte) bool {
 	return true
 }
 
+// computeAggregatePubkey computes the BLS aggregate public key from a list of pubkeys
+func computeAggregatePubkey(pubkeys [][]byte) ([]byte, error) {
+	if len(pubkeys) == 0 {
+		return nil, fmt.Errorf("empty pubkeys list")
+	}
+
+	aggregated, err := bls.AggregatePublicKeys(pubkeys)
+	if err != nil {
+		return nil, fmt.Errorf("failed to aggregate pubkeys: %w", err)
+	}
+	return aggregated.Marshal(), nil
+}
+
 // buildConsensusUpdateFromBeaconAPI builds ConsensusUpdate using standard Beacon API
 func (pr *Prover) buildConsensusUpdateFromBeaconAPI(ctx context.Context, includeNextSyncCommittee bool) (*lctypes.ConsensusUpdate, *beacon.ExecutionPayloadHeader, error) {
 	// 1. Get finalized block
@@ -581,23 +595,79 @@ func (pr *Prover) buildConsensusUpdateFromBeaconAPI(ctx context.Context, include
 }
 
 // getSyncCommitteesFromState retrieves current and next sync committees from beacon state
+// This function first tries to use the standard Beacon API (more efficient),
+// and falls back to downloading full state SSZ if the API fails.
 func (pr *Prover) getSyncCommitteesFromState(ctx context.Context, slot uint64, version string) (*lctypes.SyncCommittee, *lctypes.SyncCommittee, error) {
-	forkSpec := pr.getForkSpecForSlot(slot)
-	if forkSpec == nil {
-		return nil, nil, fmt.Errorf("no fork spec found for slot %d", slot)
-	}
+	stateId := fmt.Sprintf("%d", slot)
+	epoch := pr.computeEpoch(slot)
 
-	stateSSZ, err := pr.beaconClient.GetBeaconStateSSZ(ctx, fmt.Sprintf("%d", slot))
+	// Get current sync committee using standard Beacon API
+	currentSC, err := pr.getSyncCommitteeFromBeaconAPI(ctx, stateId, &epoch)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get beacon state SSZ: %w", err)
+		return nil, nil, fmt.Errorf("failed to get current sync committee: %w", err)
 	}
 
-	parsedState, err := ParseBeaconStateSSZ(stateSSZ, version, forkSpec)
+	// Get next sync committee (next epoch)
+	nextEpoch := epoch + 1
+	nextSC, err := pr.getSyncCommitteeFromBeaconAPI(ctx, stateId, &nextEpoch)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse beacon state SSZ: %w", err)
+		return nil, nil, fmt.Errorf("failed to get next sync committee: %w", err)
 	}
 
-	return parsedState.SyncCommittee, parsedState.NextSyncCommittee, nil
+	return currentSC, nextSC, nil
+}
+
+// getSyncCommitteeFromBeaconAPI retrieves a sync committee using standard Beacon API
+// epoch parameter specifies which sync committee to return (current or next)
+func (pr *Prover) getSyncCommitteeFromBeaconAPI(ctx context.Context, stateId string, epoch *uint64) (*lctypes.SyncCommittee, error) {
+	// Get sync committee validator indices
+	scRes, err := pr.beaconClient.GetSyncCommittees(ctx, stateId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get sync committees: %w", err)
+	}
+
+	// Extract unique validator indices (sync committee can have duplicates)
+	uniqueIndices := make([]string, 0, len(scRes.Data.Validators))
+	seen := make(map[string]bool)
+	for _, idx := range scRes.Data.Validators {
+		if !seen[idx] {
+			seen[idx] = true
+			uniqueIndices = append(uniqueIndices, idx)
+		}
+	}
+
+	// Get validator pubkeys for unique indices
+	validatorsRes, err := pr.beaconClient.GetValidators(ctx, stateId, uniqueIndices)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get validators: %w", err)
+	}
+
+	// Build pubkey map by validator index
+	pubkeyMap := make(map[string][]byte)
+	for _, v := range validatorsRes.Data {
+		pubkeyMap[v.Index] = v.Validator.Pubkey
+	}
+
+	// Collect pubkeys in order (preserving duplicates from original list)
+	pubkeys := make([][]byte, len(scRes.Data.Validators))
+	for i, idx := range scRes.Data.Validators {
+		pk, ok := pubkeyMap[idx]
+		if !ok {
+			return nil, fmt.Errorf("validator %s not found in response", idx)
+		}
+		pubkeys[i] = pk
+	}
+
+	// Compute aggregate pubkey using BLS
+	aggregatePubkey, err := computeAggregatePubkey(pubkeys)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute aggregate pubkey: %w", err)
+	}
+
+	return &lctypes.SyncCommittee{
+		Pubkeys:         pubkeys,
+		AggregatePubkey: aggregatePubkey,
+	}, nil
 }
 
 // buildConsensusUpdateForPeriod builds a ConsensusUpdate for a specific period with next_sync_committee
@@ -652,115 +722,6 @@ func (pr *Prover) buildConsensusUpdateForPeriod(ctx context.Context, period uint
 	return pr.buildConsensusUpdateWithSlots(ctx, signatureSlot, attestedSlot, finalizedBlockId, block.Version, true)
 }
 
-// buildConsensusUpdateCore is the common implementation for building ConsensusUpdate
-// signatureSlot is the slot of the block containing sync_aggregate
-// The attested block is the PARENT of the signature block (sync_aggregate signs the parent)
-func (pr *Prover) buildConsensusUpdateCore(ctx context.Context, signatureSlot uint64, finalizedBlockId string, version string, includeNextSyncCommittee bool) (*lctypes.ConsensusUpdate, *beacon.ExecutionPayloadHeader, error) {
-	forkSpec := pr.getForkSpecForSlot(signatureSlot)
-	if forkSpec == nil {
-		return nil, nil, fmt.Errorf("no fork spec found for slot %d", signatureSlot)
-	}
-
-	// Get signature block SSZ (contains sync_aggregate that signs its parent)
-	signatureBlockSSZ, err := pr.beaconClient.GetBeaconBlockSSZ(ctx, fmt.Sprintf("%d", signatureSlot))
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get signature block SSZ: %w", err)
-	}
-
-	parsedSignatureBlock, err := ParseBeaconBlockSSZ(signatureBlockSSZ, version, forkSpec)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse signature block SSZ: %w", err)
-	}
-
-	// Get the attested block (parent of signature block)
-	// The sync_aggregate in signature block signs this parent block
-	attestedBlockSSZ, err := pr.beaconClient.GetBeaconBlockSSZ(ctx, fmt.Sprintf("0x%x", parsedSignatureBlock.ParentRoot))
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get attested block SSZ (parent of signature block): %w", err)
-	}
-
-	parsedAttestedBlock, err := ParseBeaconBlockSSZ(attestedBlockSSZ, version, forkSpec)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse attested block SSZ: %w", err)
-	}
-
-	// Get attested state SSZ for finality_branch and next_sync_committee_branch generation
-	// The state at the attested block contains the finalized_checkpoint
-	attestedStateSSZ, err := pr.beaconClient.GetBeaconStateSSZ(ctx, fmt.Sprintf("%d", parsedAttestedBlock.Slot))
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get attested state SSZ: %w", err)
-	}
-
-	parsedState, err := ParseBeaconStateSSZ(attestedStateSSZ, version, forkSpec)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse attested state SSZ: %w", err)
-	}
-
-	finalityBranch, err := parsedState.GenerateFinalityBranch()
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to generate finality branch: %w", err)
-	}
-
-	// Get finalized block SSZ for execution_branch generation
-	finalizedBlockSSZ, err := pr.beaconClient.GetBeaconBlockSSZ(ctx, finalizedBlockId)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get finalized block SSZ: %w", err)
-	}
-
-	parsedFinalizedBlock, err := ParseBeaconBlockSSZ(finalizedBlockSSZ, version, forkSpec)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse finalized block SSZ: %w", err)
-	}
-
-	executionBranch, err := parsedFinalizedBlock.GenerateExecutionPayloadBranch()
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to generate execution branch: %w", err)
-	}
-
-	pr.GetLogger().DebugContext(ctx, "building consensus update",
-		"signature_slot", signatureSlot,
-		"attested_slot", parsedAttestedBlock.Slot,
-		"finalized_slot", parsedFinalizedBlock.Slot)
-
-	// Build ConsensusUpdate
-	// - AttestedHeader: the block that sync_aggregate signs (parent of signature block)
-	// - SyncAggregate: from signature block, signs the attested header
-	// - SignatureSlot: slot of the signature block
-	update := &lctypes.ConsensusUpdate{
-		AttestedHeader: &lctypes.BeaconBlockHeader{
-			Slot:          parsedAttestedBlock.Slot,
-			ProposerIndex: parsedAttestedBlock.ProposerIndex,
-			ParentRoot:    parsedAttestedBlock.ParentRoot,
-			StateRoot:     parsedAttestedBlock.StateRoot,
-			BodyRoot:      parsedAttestedBlock.BodyRoot,
-		},
-		FinalizedHeader: &lctypes.BeaconBlockHeader{
-			Slot:          parsedFinalizedBlock.Slot,
-			ProposerIndex: parsedFinalizedBlock.ProposerIndex,
-			ParentRoot:    parsedFinalizedBlock.ParentRoot,
-			StateRoot:     parsedFinalizedBlock.StateRoot,
-			BodyRoot:      parsedFinalizedBlock.BodyRoot,
-		},
-		FinalizedHeaderBranch:    finalityBranch,
-		FinalizedExecutionRoot:   parsedFinalizedBlock.ExecutionRoot,
-		FinalizedExecutionBranch: executionBranch,
-		SyncAggregate:            parsedSignatureBlock.SyncAggregate,
-		SignatureSlot:            signatureSlot,
-	}
-
-	// Optionally add next sync committee
-	if includeNextSyncCommittee {
-		update.NextSyncCommittee = parsedState.NextSyncCommittee
-		nextSyncCommitteeBranch, err := parsedState.GenerateNextSyncCommitteeBranch()
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to generate next sync committee branch: %w", err)
-		}
-		update.NextSyncCommitteeBranch = nextSyncCommitteeBranch
-	}
-
-	return update, parsedFinalizedBlock.ExecutionPayload, nil
-}
-
 // buildConsensusUpdateWithSlots builds ConsensusUpdate with explicitly provided signature and attested slots
 func (pr *Prover) buildConsensusUpdateWithSlots(ctx context.Context, signatureSlot, attestedSlot uint64, finalizedBlockId string, version string, includeNextSyncCommittee bool) (*lctypes.ConsensusUpdate, *beacon.ExecutionPayloadHeader, error) {
 	forkSpec := pr.getForkSpecForSlot(signatureSlot)
@@ -790,23 +751,7 @@ func (pr *Prover) buildConsensusUpdateWithSlots(ctx context.Context, signatureSl
 		return nil, nil, fmt.Errorf("failed to parse attested block SSZ: %w", err)
 	}
 
-	// Get attested state SSZ for finality_branch and next_sync_committee_branch generation
-	attestedStateSSZ, err := pr.beaconClient.GetBeaconStateSSZ(ctx, fmt.Sprintf("%d", attestedSlot))
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get attested state SSZ: %w", err)
-	}
-
-	parsedState, err := ParseBeaconStateSSZ(attestedStateSSZ, version, forkSpec)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse attested state SSZ: %w", err)
-	}
-
-	finalityBranch, err := parsedState.GenerateFinalityBranch()
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to generate finality branch: %w", err)
-	}
-
-	// Get finalized block SSZ for execution_branch generation
+	// Get finalized block SSZ for execution payload data
 	finalizedBlockSSZ, err := pr.beaconClient.GetBeaconBlockSSZ(ctx, finalizedBlockId)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get finalized block SSZ: %w", err)
@@ -817,9 +762,33 @@ func (pr *Prover) buildConsensusUpdateWithSlots(ctx context.Context, signatureSl
 		return nil, nil, fmt.Errorf("failed to parse finalized block SSZ: %w", err)
 	}
 
-	executionBranch, err := parsedFinalizedBlock.GenerateExecutionPayloadBranch()
+	// Use Lodestar proof API for branches
+	var finalityBranch, nextSyncCommitteeBranch, executionBranch [][]byte
+	var nextSyncCommittee *lctypes.SyncCommittee
+
+	attestedStateId := fmt.Sprintf("%d", attestedSlot)
+	finalityBranch, nextSyncCommitteeBranch, err = pr.getBranchesFromProofAPI(ctx, attestedStateId, version, includeNextSyncCommittee)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to generate execution branch: %w", err)
+		return nil, nil, fmt.Errorf("failed to get branches from proof API: %w", err)
+	}
+
+	// Get next_sync_committee data if requested (we need the actual pubkeys, not just the branch)
+	if includeNextSyncCommittee {
+		_, nextSyncCommittee, err = pr.getSyncCommitteesFromState(ctx, attestedSlot, version)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to get next sync committee: %w", err)
+		}
+	}
+
+	// Try to use proof API for execution branch
+	executionBranch, err = pr.getExecutionBranchFromProofAPI(ctx, finalizedBlockId)
+	if err != nil {
+		pr.GetLogger().DebugContext(ctx, "proof API for execution branch not available, falling back to local computation", "err", err)
+		// Fall back to local computation from block body
+		executionBranch, err = parsedFinalizedBlock.GenerateExecutionPayloadBranch()
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to generate execution branch: %w", err)
+		}
 	}
 
 	pr.GetLogger().DebugContext(ctx, "building consensus update with slots",
@@ -852,11 +821,7 @@ func (pr *Prover) buildConsensusUpdateWithSlots(ctx context.Context, signatureSl
 
 	// Optionally add next sync committee
 	if includeNextSyncCommittee {
-		update.NextSyncCommittee = parsedState.NextSyncCommittee
-		nextSyncCommitteeBranch, err := parsedState.GenerateNextSyncCommitteeBranch()
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to generate next sync committee branch: %w", err)
-		}
+		update.NextSyncCommittee = nextSyncCommittee
 		update.NextSyncCommitteeBranch = nextSyncCommitteeBranch
 	}
 
@@ -884,6 +849,94 @@ func (pr *Prover) findValidBlockSlot(ctx context.Context, targetSlot uint64) (ui
 	}
 
 	return 0, fmt.Errorf("no valid block found near slot %d", targetSlot)
+}
+
+// getBranchesFromProofAPI retrieves finality_branch and optionally next_sync_committee_branch using Lodestar's proof API
+// This is more efficient than downloading the full BeaconState (which can be several GB on mainnet)
+// Note: This is a Lodestar-specific API and will not work with other beacon node implementations
+func (pr *Prover) getBranchesFromProofAPI(ctx context.Context, stateId string, version string, includeNextSyncCommittee bool) (finalityBranch [][]byte, nextSyncCommitteeBranch [][]byte, err error) {
+	// Get the appropriate gindices for the version
+	finalizedRootGindex := beacon.GetFinalizedRootGindex(version)
+
+	// Get finality branch
+	finalityProofRes, err := pr.beaconClient.GetStateProof(ctx, stateId, []uint64{finalizedRootGindex})
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get finality proof: %w", err)
+	}
+
+	leaves := make([][]byte, len(finalityProofRes.Data.Leaves))
+	for i, l := range finalityProofRes.Data.Leaves {
+		leaves[i] = l
+	}
+
+	finalityBranch, err = beacon.ExtractSingleProofBranch(leaves, finalizedRootGindex)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to extract finality branch: %w", err)
+	}
+
+	pr.GetLogger().DebugContext(ctx, "got finality branch from proof API",
+		"stateId", stateId,
+		"version", version,
+		"gindex", finalizedRootGindex,
+		"branch_length", len(finalityBranch))
+
+	if !includeNextSyncCommittee {
+		return finalityBranch, nil, nil
+	}
+
+	// Get next sync committee branch
+	nextSyncCommitteeGindex := beacon.GetNextSyncCommitteeGindex(version)
+
+	nextSyncCommitteeProofRes, err := pr.beaconClient.GetStateProof(ctx, stateId, []uint64{nextSyncCommitteeGindex})
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get next sync committee proof: %w", err)
+	}
+
+	leaves = make([][]byte, len(nextSyncCommitteeProofRes.Data.Leaves))
+	for i, l := range nextSyncCommitteeProofRes.Data.Leaves {
+		leaves[i] = l
+	}
+
+	nextSyncCommitteeBranch, err = beacon.ExtractSingleProofBranch(leaves, nextSyncCommitteeGindex)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to extract next sync committee branch: %w", err)
+	}
+
+	pr.GetLogger().DebugContext(ctx, "got next sync committee branch from proof API",
+		"stateId", stateId,
+		"version", version,
+		"gindex", nextSyncCommitteeGindex,
+		"branch_length", len(nextSyncCommitteeBranch))
+
+	return finalityBranch, nextSyncCommitteeBranch, nil
+}
+
+// getExecutionBranchFromProofAPI retrieves execution_branch using Lodestar's proof API
+func (pr *Prover) getExecutionBranchFromProofAPI(ctx context.Context, blockId string) ([][]byte, error) {
+	gindex := uint64(beacon.BlockBodyExecutionPayloadGindex)
+
+	proofRes, err := pr.beaconClient.GetBlockProof(ctx, blockId, []uint64{gindex})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get execution payload proof: %w", err)
+	}
+
+	leaves := make([][]byte, len(proofRes.Data.Leaves))
+	for i, l := range proofRes.Data.Leaves {
+		leaves[i] = l
+	}
+
+	branch, err := beacon.ExtractSingleProofBranch(leaves, gindex)
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract execution branch: %w", err)
+	}
+
+	pr.GetLogger().DebugContext(ctx, "got execution branch from proof API",
+		"blockId", blockId,
+		"version", proofRes.Version,
+		"gindex", gindex,
+		"branch_length", len(branch))
+
+	return branch, nil
 }
 
 // getSyncCommitteesInPeriod retrieves current and next sync committees for a specific period

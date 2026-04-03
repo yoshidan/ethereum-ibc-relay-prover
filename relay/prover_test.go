@@ -107,7 +107,7 @@ var _ core.Chain = (*mockChain)(nil)
 func getBeaconEndpoint() string {
 	endpoint := os.Getenv("BEACON_ENDPOINT")
 	if endpoint == "" {
-		endpoint = "http://localhost:59796"
+		endpoint = "http://localhost:59014"
 	}
 	return endpoint
 }
@@ -643,42 +643,5 @@ func TestSSZParsing(t *testing.T) {
 	}
 	if parsed.SyncAggregate == nil {
 		t.Error("SyncAggregate should not be nil")
-	}
-
-	// Parse state SSZ
-	stateSSZ, err := pr.beaconClient.GetBeaconStateSSZ(ctx, "finalized")
-	if err != nil {
-		t.Fatalf("Failed to get state SSZ: %v", err)
-	}
-	t.Logf("State SSZ size: %d bytes", len(stateSSZ))
-
-	parsedState, err := ParseBeaconStateSSZ(stateSSZ, block.Version, forkSpec)
-	if err != nil {
-		t.Fatalf("ParseBeaconStateSSZ failed: %v", err)
-	}
-	t.Logf("Successfully parsed state, sync committee pubkeys: %d", len(parsedState.SyncCommittee.Pubkeys))
-
-	// Validate parsed state data
-	expectedCommitteeSize := MAINNET_PRESET_SYNC_COMMITTEE_SIZE
-	if !pr.config.IsMainnetPreset() {
-		expectedCommitteeSize = MINIMAL_PRESET_SYNC_COMMITTEE_SIZE
-	}
-
-	if parsedState.SyncCommittee == nil {
-		t.Error("SyncCommittee should not be nil")
-	} else {
-		if len(parsedState.SyncCommittee.Pubkeys) != expectedCommitteeSize {
-			t.Errorf("SyncCommittee should have %d pubkeys, got %d", expectedCommitteeSize, len(parsedState.SyncCommittee.Pubkeys))
-		}
-		if len(parsedState.SyncCommittee.AggregatePubkey) == 0 {
-			t.Error("SyncCommittee.AggregatePubkey should not be empty")
-		}
-	}
-	if parsedState.NextSyncCommittee == nil {
-		t.Error("NextSyncCommittee should not be nil")
-	} else {
-		if len(parsedState.NextSyncCommittee.Pubkeys) != expectedCommitteeSize {
-			t.Errorf("NextSyncCommittee should have %d pubkeys, got %d", expectedCommitteeSize, len(parsedState.NextSyncCommittee.Pubkeys))
-		}
 	}
 }

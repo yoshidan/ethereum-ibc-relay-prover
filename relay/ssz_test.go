@@ -3,16 +3,26 @@ package relay
 import (
 	"context"
 	"testing"
+
+	"github.com/datachainlab/ethereum-ibc-relay-prover/beacon"
 )
 
 func newTestProverForSSZ(t *testing.T) *Prover {
 	initTestLogger()
 
+	endpoint := getBeaconEndpoint()
+	beaconClient := beacon.NewClient(endpoint)
+
 	// Create a devnet config for testing (mainnet preset with all forks at epoch 0)
-	config := ProverConfig{}
+	config := ProverConfig{
+		Network:        "kurtosis_minimal",
+		BeaconEndpoint: endpoint,
+	}
+
 	return &Prover{
-		chain:  &mockChain{},
-		config: config,
+		chain:        &mockChain{},
+		config:       config,
+		beaconClient: beaconClient,
 	}
 }
 
@@ -185,66 +195,6 @@ func TestSyncCommitteeToProto(t *testing.T) {
 	if result != nil {
 		t.Error("syncCommitteeToProto(nil) should return nil")
 	}
-}
-
-// TestParsedBeaconStateGenerateBranches tests the proof generation methods
-func TestParsedBeaconStateGenerateBranches(t *testing.T) {
-	// This test requires a beacon node to be running
-	// Use the same test helper as prover_test.go
-	pr := newTestProverForSSZ(t)
-	ctx := context.Background()
-
-	// Get finalized block info
-	block, err := pr.beaconClient.GetBeaconBlock(ctx, "finalized")
-	if err != nil {
-		t.Skipf("Beacon API not available: %v", err)
-	}
-
-	slot := uint64(block.Data.Message.Slot)
-	forkSpec := pr.getForkSpecForSlot(slot)
-	if forkSpec == nil {
-		t.Fatalf("getForkSpecForSlot returned nil for slot %d", slot)
-	}
-
-	// Get state SSZ
-	stateSSZ, err := pr.beaconClient.GetBeaconStateSSZ(ctx, "finalized")
-	if err != nil {
-		t.Fatalf("Failed to get state SSZ: %v", err)
-	}
-
-	// Parse state
-	parsedState, err := ParseBeaconStateSSZ(stateSSZ, block.Version, forkSpec)
-	if err != nil {
-		t.Fatalf("Failed to parse state SSZ: %v", err)
-	}
-
-	// Test finality branch generation
-	finalityBranch, err := parsedState.GenerateFinalityBranch()
-	if err != nil {
-		t.Fatalf("GenerateFinalityBranch failed: %v", err)
-	}
-
-	expectedDepth := gindexToDepth(forkSpec.FinalizedRootGindex)
-	if len(finalityBranch) != expectedDepth {
-		t.Errorf("Finality branch has %d elements, expected %d (depth for gindex %d)",
-			len(finalityBranch), expectedDepth, forkSpec.FinalizedRootGindex)
-	}
-
-	t.Logf("Finality branch generated with %d elements for gindex %d", len(finalityBranch), forkSpec.FinalizedRootGindex)
-
-	// Test next sync committee branch generation
-	nextSCBranch, err := parsedState.GenerateNextSyncCommitteeBranch()
-	if err != nil {
-		t.Fatalf("GenerateNextSyncCommitteeBranch failed: %v", err)
-	}
-
-	expectedSCDepth := gindexToDepth(forkSpec.NextSyncCommitteeGindex)
-	if len(nextSCBranch) != expectedSCDepth {
-		t.Errorf("Next sync committee branch has %d elements, expected %d (depth for gindex %d)",
-			len(nextSCBranch), expectedSCDepth, forkSpec.NextSyncCommitteeGindex)
-	}
-
-	t.Logf("Next sync committee branch generated with %d elements for gindex %d", len(nextSCBranch), forkSpec.NextSyncCommitteeGindex)
 }
 
 // TestParsedBeaconBlockGenerateExecutionBranch tests the execution branch generation

@@ -199,3 +199,41 @@ type SyncCommitteesDataJSON struct {
 	Validators          []string   `json:"validators"`
 	ValidatorAggregates [][]string `json:"validator_aggregates"`
 }
+
+// ValidatorsResponse is the response from GET /eth/v1/beacon/states/{state_id}/validators
+type ValidatorsResponse struct {
+	ExecutionOptimistic bool            `json:"execution_optimistic"`
+	Finalized           bool            `json:"finalized"`
+	Data                []ValidatorData `json:"data"`
+}
+
+type ValidatorData struct {
+	Index     string          `json:"index"`
+	Balance   string          `json:"balance"`
+	Status    string          `json:"status"`
+	Validator ValidatorFields `json:"validator"`
+}
+
+type ValidatorFields struct {
+	Pubkey                     hexutil.Bytes `json:"pubkey"`
+	WithdrawalCredentials      hexutil.Bytes `json:"withdrawal_credentials"`
+	EffectiveBalance           string        `json:"effective_balance"`
+	Slashed                    bool          `json:"slashed"`
+	ActivationEligibilityEpoch string        `json:"activation_eligibility_epoch"`
+	ActivationEpoch            string        `json:"activation_epoch"`
+	ExitEpoch                  string        `json:"exit_epoch"`
+	WithdrawableEpoch          string        `json:"withdrawable_epoch"`
+}
+
+// CompactMultiProofResponse is the response from Lodestar's proof API
+// GET /eth/v0/beacon/proof/state/{state_id}?format={descriptor}
+// GET /eth/v0/beacon/proof/block/{block_id}?format={descriptor}
+type CompactMultiProofResponse struct {
+	Data    CompactMultiProofData `json:"data"`
+	Version string                `json:"version"`
+}
+
+type CompactMultiProofData struct {
+	Leaves     []hexutil.Bytes `json:"leaves"`
+	Descriptor hexutil.Bytes   `json:"descriptor"`
+}

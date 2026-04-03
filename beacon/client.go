@@ -1,6 +1,7 @@
 package beacon
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -129,11 +130,6 @@ func (cl Client) GetBeaconBlockSSZ(ctx context.Context, blockId string) ([]byte,
 	return cl.getSSZ(ctx, fmt.Sprintf("/eth/v2/beacon/blocks/%s", blockId))
 }
 
-// GetBeaconStateSSZ retrieves a beacon state in SSZ format
-func (cl Client) GetBeaconStateSSZ(ctx context.Context, stateId string) ([]byte, error) {
-	return cl.getSSZ(ctx, fmt.Sprintf("/eth/v2/debug/beacon/states/%s", stateId))
-}
-
 // GetFinalityCheckpointsAtState retrieves finality checkpoints for a specific state
 func (cl Client) GetFinalityCheckpointsAtState(ctx context.Context, stateId string) (*StateFinalityCheckpoints, error) {
 	var res StateFinalityCheckpointResponse
@@ -148,6 +144,49 @@ func (cl Client) GetSyncCommittees(ctx context.Context, stateId string) (*SyncCo
 	var res SyncCommitteesResponse
 	if err := cl.get(ctx, fmt.Sprintf("/eth/v1/beacon/states/%s/sync_committees", stateId), &res); err != nil {
 		return nil, err
+	}
+	return &res, nil
+}
+
+// GetValidators retrieves validators by their indices using POST method
+// POST is used to avoid URL length limits with many validator indices
+func (cl Client) GetValidators(ctx context.Context, stateId string, indices []string) (*ValidatorsResponse, error) {
+	var res ValidatorsResponse
+	body := map[string][]string{"ids": indices}
+	if err := cl.post(ctx, fmt.Sprintf("/eth/v1/beacon/states/%s/validators", stateId), body, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+// GetStateProof retrieves a Merkle proof for specific gindices from Lodestar's proof API
+// This is a Lodestar-specific API (not standard Beacon API)
+func (cl Client) GetStateProof(ctx context.Context, stateId string, gindices []uint64) (*CompactMultiProofResponse, error) {
+	descriptor := ComputeDescriptor(gindices)
+	descriptorHex := "0x" + hex.EncodeToString(descriptor)
+
+	var res CompactMultiProofResponse
+	if err := cl.get(ctx, fmt.Sprintf("/eth/v0/beacon/proof/state/%s?format=%s", stateId, descriptorHex), &res); err != nil {
+		return nil, err
+	}
+	if !IsSupportedVersion(res.Version) {
+		return nil, fmt.Errorf("unsupported version: %v", res.Version)
+	}
+	return &res, nil
+}
+
+// GetBlockProof retrieves a Merkle proof for specific gindices from Lodestar's proof API
+// This is a Lodestar-specific API (not standard Beacon API)
+func (cl Client) GetBlockProof(ctx context.Context, blockId string, gindices []uint64) (*CompactMultiProofResponse, error) {
+	descriptor := ComputeDescriptor(gindices)
+	descriptorHex := "0x" + hex.EncodeToString(descriptor)
+
+	var res CompactMultiProofResponse
+	if err := cl.get(ctx, fmt.Sprintf("/eth/v0/beacon/proof/block/%s?format=%s", blockId, descriptorHex), &res); err != nil {
+		return nil, err
+	}
+	if !IsSupportedVersion(res.Version) {
+		return nil, fmt.Errorf("unsupported version: %v", res.Version)
 	}
 	return &res, nil
 }
@@ -170,6 +209,35 @@ func (cl Client) get(ctx context.Context, path string, res any) error {
 	}
 	if r.StatusCode < 200 || r.StatusCode >= 300 {
 		log.GetLogger().DebugContext(ctx, "Non 2xx response to Beacon API request", "endpoint", cl.endpoint+path, "status code", r.StatusCode, "response body", string(bz))
+		return fmt.Errorf("request returned status code %d", r.StatusCode)
+	}
+	return json.Unmarshal(bz, &res)
+}
+
+func (cl Client) post(ctx context.Context, path string, body any, res any) error {
+	log.GetLogger().DebugContext(ctx, "Beacon API POST request", "endpoint", cl.endpoint+path)
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", cl.endpoint+path, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	r, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer r.Body.Close()
+	bz, err := io.ReadAll(r.Body)
+	if err != nil {
+		return err
+	}
+	if r.StatusCode < 200 || r.StatusCode >= 300 {
+		log.GetLogger().DebugContext(ctx, "Non 2xx response to Beacon API POST request", "endpoint", cl.endpoint+path, "status code", r.StatusCode, "response body", string(bz))
 		return fmt.Errorf("request returned status code %d", r.StatusCode)
 	}
 	return json.Unmarshal(bz, &res)
