@@ -107,7 +107,7 @@ var _ core.Chain = (*mockChain)(nil)
 func getBeaconEndpoint() string {
 	endpoint := os.Getenv("BEACON_ENDPOINT")
 	if endpoint == "" {
-		endpoint = "http://localhost:64593"
+		endpoint = "http://localhost:61039"
 	}
 	return endpoint
 }
@@ -120,7 +120,7 @@ func newTestProver(t *testing.T) *Prover {
 
 	// Create a devnet config for testing (mainnet preset with all forks at epoch 0)
 	config := ProverConfig{
-		Network:        "devnet",
+		Network:        "KurtosisMinimal",
 		BeaconEndpoint: endpoint,
 	}
 
@@ -575,10 +575,10 @@ func TestSSZParsing(t *testing.T) {
 	}
 	t.Logf("Block SSZ size: %d bytes", len(blockSSZ))
 
-	// Parse block SSZ
-	parsed, err := ParseBeaconBlockSSZ(blockSSZ, block.Version, forkSpec)
+	// Parse block SSZ using preset-aware function
+	parsed, err := ParseBeaconBlockSSZWithPreset(blockSSZ, block.Version, forkSpec, pr.config.IsMainnetPreset())
 	if err != nil {
-		t.Fatalf("ParseBeaconBlockSSZ failed: %v", err)
+		t.Fatalf("ParseBeaconBlockSSZWithPreset failed: %v", err)
 	}
 	t.Logf("Successfully parsed block: slot=%d, proposer_index=%d", parsed.Slot, parsed.ProposerIndex)
 
@@ -612,19 +612,23 @@ func TestSSZParsing(t *testing.T) {
 	}
 	t.Logf("State SSZ size: %d bytes", len(stateSSZ))
 
-	parsedState, err := ParseBeaconStateSSZ(stateSSZ, block.Version, forkSpec)
+	parsedState, err := ParseBeaconStateSSZWithPreset(stateSSZ, block.Version, forkSpec, pr.config.IsMainnetPreset())
 	if err != nil {
-		t.Fatalf("ParseBeaconStateSSZ failed: %v", err)
+		t.Fatalf("ParseBeaconStateSSZWithPreset failed: %v", err)
 	}
 	t.Logf("Successfully parsed state, sync committee pubkeys: %d", len(parsedState.SyncCommittee.Pubkeys))
 
 	// Validate parsed state data
+	// Expected size depends on the preset (mainnet=512, minimal=32)
+	expectedSize := MAINNET_PRESET_SYNC_COMMITTEE_SIZE
+	if !pr.config.IsMainnetPreset() {
+		expectedSize = MINIMAL_PRESET_SYNC_COMMITTEE_SIZE
+	}
 	if parsedState.SyncCommittee == nil {
 		t.Error("SyncCommittee should not be nil")
 	} else {
-		// Mainnet preset should have 512 pubkeys
-		if len(parsedState.SyncCommittee.Pubkeys) != 512 {
-			t.Errorf("SyncCommittee should have 512 pubkeys (mainnet), got %d", len(parsedState.SyncCommittee.Pubkeys))
+		if len(parsedState.SyncCommittee.Pubkeys) != expectedSize {
+			t.Errorf("SyncCommittee should have %d pubkeys, got %d", expectedSize, len(parsedState.SyncCommittee.Pubkeys))
 		}
 		if len(parsedState.SyncCommittee.AggregatePubkey) == 0 {
 			t.Error("SyncCommittee.AggregatePubkey should not be empty")
@@ -633,8 +637,8 @@ func TestSSZParsing(t *testing.T) {
 	if parsedState.NextSyncCommittee == nil {
 		t.Error("NextSyncCommittee should not be nil")
 	} else {
-		if len(parsedState.NextSyncCommittee.Pubkeys) != 512 {
-			t.Errorf("NextSyncCommittee should have 512 pubkeys (mainnet), got %d", len(parsedState.NextSyncCommittee.Pubkeys))
+		if len(parsedState.NextSyncCommittee.Pubkeys) != expectedSize {
+			t.Errorf("NextSyncCommittee should have %d pubkeys, got %d", expectedSize, len(parsedState.NextSyncCommittee.Pubkeys))
 		}
 	}
 }

@@ -12,11 +12,10 @@ import (
 )
 
 const (
-	Mainnet        = "mainnet"
-	Minimal        = "minimal"
-	Sepolia        = "sepolia"
-	Devnet         = "devnet"          // Uses mainnet preset with custom fork schedule
-	KurtosisDevnet = "kurtosis_devnet" // Uses mainnet preset with custom fork schedule
+	Mainnet         = "mainnet"
+	Minimal         = "minimal"
+	Sepolia         = "sepolia"
+	KurtosisMinimal = "KurtosisMinimal" // Uses mainnet preset with custom fork schedule
 )
 
 const (
@@ -138,9 +137,9 @@ func (prc *ProverConfig) GetMaxClockDrift() time.Duration {
 // NOTE the prover supports only the mainnet and minimal preset for now
 func (prc *ProverConfig) IsMainnetPreset() bool {
 	switch prc.Network {
-	case Mainnet, Sepolia, Devnet:
+	case Mainnet, Sepolia:
 		return true
-	case Minimal:
+	case Minimal, KurtosisMinimal:
 		return false
 	default:
 		panic(fmt.Sprintf("unknown network: %v", prc.Network))
@@ -186,7 +185,7 @@ func (prc *ProverConfig) getForkParameters() *lctypes.ForkParameters {
 				},
 			},
 		}
-	case Minimal, Devnet:
+	case Minimal:
 		return &lctypes.ForkParameters{
 			GenesisForkVersion: []byte{0, 0, 0, 1},
 			Forks: []*lctypes.Fork{
@@ -259,7 +258,7 @@ func (prc *ProverConfig) getForkParameters() *lctypes.ForkParameters {
 				},
 			},
 		}
-	case KurtosisDevnet:
+	case KurtosisMinimal:
 		// Devnet uses mainnet preset but all forks at epoch 0 (like Kurtosis devnet)
 		return &lctypes.ForkParameters{
 			GenesisForkVersion: []byte{0x10, 0x00, 0x00, 0x00},

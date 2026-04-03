@@ -117,21 +117,33 @@ type ParsedBeaconState struct {
 	NextSyncCommittee *lctypes.SyncCommittee
 	forkSpec          *lctypes.ForkSpec
 	stateSSZ          []byte
-	// Parsed prysm state types for proof generation
+	// Parsed prysm state types for proof generation (mainnet only)
 	stateFulu    *ethpb.BeaconStateFulu
 	stateElectra *ethpb.BeaconStateElectra
 	stateDeneb   *ethpb.BeaconStateDeneb
 	version      string
+	// Raw parsed state (works for both mainnet and minimal)
+	rawState *RawBeaconState
 }
 
 // GenerateFinalityBranch generates the Merkle proof for the finalized_checkpoint field
 func (p *ParsedBeaconState) GenerateFinalityBranch() ([][]byte, error) {
+	// Use raw state if available (works for both mainnet and minimal)
+	if p.rawState != nil {
+		return p.rawState.GenerateFinalityBranch()
+	}
+	// Fall back to prysm-based implementation (mainnet only)
 	gindex := p.forkSpec.FinalizedRootGindex
 	return p.generateStateProofFromSSZ(gindex)
 }
 
 // GenerateNextSyncCommitteeBranch generates the Merkle proof for the next_sync_committee field
 func (p *ParsedBeaconState) GenerateNextSyncCommitteeBranch() ([][]byte, error) {
+	// Use raw state if available (works for both mainnet and minimal)
+	if p.rawState != nil {
+		return p.rawState.GenerateNextSyncCommitteeBranch()
+	}
+	// Fall back to prysm-based implementation (mainnet only)
 	gindex := p.forkSpec.NextSyncCommitteeGindex
 	return p.generateStateProofFromSSZ(gindex)
 }
@@ -187,15 +199,23 @@ type ParsedBeaconBlock struct {
 	SyncAggregate    *lctypes.SyncAggregate
 	forkSpec         *lctypes.ForkSpec
 	bodySSZ          []byte
-	// Parsed prysm body types for proof generation
+	// Parsed prysm body types for proof generation (mainnet only)
 	// Note: Fulu uses the same body type as Electra
 	bodyElectra *ethpb.BeaconBlockBodyElectra
 	bodyDeneb   *ethpb.BeaconBlockBodyDeneb
 	version     string
+	// Raw parsed block (works for both mainnet and minimal)
+	rawBlock *RawBeaconBlock
 }
 
 // GenerateExecutionPayloadBranch generates the Merkle proof for the execution_payload field in the block body
 func (p *ParsedBeaconBlock) GenerateExecutionPayloadBranch() ([][]byte, error) {
+	// Use raw block if available (works for both mainnet and minimal)
+	if p.rawBlock != nil {
+		return p.rawBlock.GenerateExecutionPayloadBranch()
+	}
+
+	// Fall back to prysm-based implementation (mainnet only)
 	gindex := p.forkSpec.ExecutionPayloadGindex
 
 	// Get field hashes based on version
@@ -352,6 +372,53 @@ func ParseBeaconBlockSSZ(data []byte, version string, forkSpec *lctypes.ForkSpec
 		return nil, fmt.Errorf("failed to compute execution root: %w", err)
 	}
 	result.ExecutionRoot = executionRoot[:]
+
+	return result, nil
+}
+
+// ParseBeaconStateSSZWithPreset parses SSZ-encoded beacon state data with preset awareness
+// This works for both mainnet and minimal presets
+func ParseBeaconStateSSZWithPreset(data []byte, version string, forkSpec *lctypes.ForkSpec, isMainnet bool) (*ParsedBeaconState, error) {
+	// Use raw parser which works for both presets
+	rawState, err := ParseRawBeaconState(data, version, forkSpec, isMainnet)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse raw beacon state: %w", err)
+	}
+
+	result := &ParsedBeaconState{
+		forkSpec:          forkSpec,
+		stateSSZ:          data,
+		version:           version,
+		SyncCommittee:     rawState.SyncCommittee,
+		NextSyncCommittee: rawState.NextSyncCommittee,
+		rawState:          rawState,
+	}
+
+	return result, nil
+}
+
+// ParseBeaconBlockSSZWithPreset parses SSZ-encoded signed beacon block data with preset awareness
+// This works for both mainnet and minimal presets
+func ParseBeaconBlockSSZWithPreset(data []byte, version string, forkSpec *lctypes.ForkSpec, isMainnet bool) (*ParsedBeaconBlock, error) {
+	// Use raw parser which works for both presets
+	rawBlock, err := ParseRawBeaconBlock(data, version, forkSpec, isMainnet)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse raw beacon block: %w", err)
+	}
+
+	result := &ParsedBeaconBlock{
+		forkSpec:         forkSpec,
+		version:          version,
+		Slot:             rawBlock.Slot,
+		ProposerIndex:    rawBlock.ProposerIndex,
+		ParentRoot:       rawBlock.ParentRoot,
+		StateRoot:        rawBlock.StateRoot,
+		BodyRoot:         rawBlock.BodyRoot,
+		ExecutionPayload: rawBlock.ExecutionPayload,
+		ExecutionRoot:    rawBlock.ExecutionRoot,
+		SyncAggregate:    rawBlock.SyncAggregate,
+		rawBlock:         rawBlock,
+	}
 
 	return result, nil
 }

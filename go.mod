@@ -257,3 +257,5 @@ require (
 )
 
 replace github.com/btcsuite/btcd/btcec/v2 => github.com/btcsuite/btcd/btcec/v2 v2.3.2
+
+replace github.com/OffchainLabs/prysm/v7 => /Users/naohiro.yoshida/go/src/github.com/yoshidan/prysm

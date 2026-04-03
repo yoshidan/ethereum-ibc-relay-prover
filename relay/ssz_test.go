@@ -13,9 +13,9 @@ func newTestProverForSSZ(t *testing.T) *Prover {
 	endpoint := getBeaconEndpoint() // Use shared helper from prover_test.go
 	beaconClient := beacon.NewClient(endpoint)
 
-	// Create a devnet config for testing (mainnet preset with all forks at epoch 0)
+	// Create a minimal config for testing (minimal preset with all forks at epoch 0)
 	config := ProverConfig{
-		Network:        "devnet",
+		Network:        "minimal",
 		BeaconEndpoint: endpoint,
 	}
 
@@ -222,8 +222,8 @@ func TestParsedBeaconStateGenerateBranches(t *testing.T) {
 		t.Fatalf("Failed to get state SSZ: %v", err)
 	}
 
-	// Parse state
-	parsedState, err := ParseBeaconStateSSZ(stateSSZ, block.Version, forkSpec)
+	// Parse state using preset-aware function
+	parsedState, err := ParseBeaconStateSSZWithPreset(stateSSZ, block.Version, forkSpec, pr.config.IsMainnetPreset())
 	if err != nil {
 		t.Fatalf("Failed to parse state SSZ: %v", err)
 	}
@@ -281,8 +281,8 @@ func TestParsedBeaconBlockGenerateExecutionBranch(t *testing.T) {
 		t.Fatalf("Failed to get block SSZ: %v", err)
 	}
 
-	// Parse block
-	parsedBlock, err := ParseBeaconBlockSSZ(blockSSZ, block.Version, forkSpec)
+	// Parse block using preset-aware function
+	parsedBlock, err := ParseBeaconBlockSSZWithPreset(blockSSZ, block.Version, forkSpec, pr.config.IsMainnetPreset())
 	if err != nil {
 		t.Fatalf("Failed to parse block SSZ: %v", err)
 	}

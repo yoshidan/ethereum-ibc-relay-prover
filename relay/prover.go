@@ -592,7 +592,7 @@ func (pr *Prover) getSyncCommitteesFromState(ctx context.Context, slot uint64, v
 		return nil, nil, fmt.Errorf("failed to get beacon state SSZ: %w", err)
 	}
 
-	parsedState, err := ParseBeaconStateSSZ(stateSSZ, version, forkSpec)
+	parsedState, err := ParseBeaconStateSSZWithPreset(stateSSZ, version, forkSpec, pr.config.IsMainnetPreset())
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse beacon state SSZ: %w", err)
 	}
@@ -667,7 +667,7 @@ func (pr *Prover) buildConsensusUpdateCore(ctx context.Context, signatureSlot ui
 		return nil, nil, fmt.Errorf("failed to get signature block SSZ: %w", err)
 	}
 
-	parsedSignatureBlock, err := ParseBeaconBlockSSZ(signatureBlockSSZ, version, forkSpec)
+	parsedSignatureBlock, err := ParseBeaconBlockSSZWithPreset(signatureBlockSSZ, version, forkSpec, pr.config.IsMainnetPreset())
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse signature block SSZ: %w", err)
 	}
@@ -679,7 +679,7 @@ func (pr *Prover) buildConsensusUpdateCore(ctx context.Context, signatureSlot ui
 		return nil, nil, fmt.Errorf("failed to get attested block SSZ (parent of signature block): %w", err)
 	}
 
-	parsedAttestedBlock, err := ParseBeaconBlockSSZ(attestedBlockSSZ, version, forkSpec)
+	parsedAttestedBlock, err := ParseBeaconBlockSSZWithPreset(attestedBlockSSZ, version, forkSpec, pr.config.IsMainnetPreset())
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse attested block SSZ: %w", err)
 	}
@@ -691,7 +691,7 @@ func (pr *Prover) buildConsensusUpdateCore(ctx context.Context, signatureSlot ui
 		return nil, nil, fmt.Errorf("failed to get attested state SSZ: %w", err)
 	}
 
-	parsedState, err := ParseBeaconStateSSZ(attestedStateSSZ, version, forkSpec)
+	parsedState, err := ParseBeaconStateSSZWithPreset(attestedStateSSZ, version, forkSpec, pr.config.IsMainnetPreset())
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse attested state SSZ: %w", err)
 	}
@@ -707,7 +707,7 @@ func (pr *Prover) buildConsensusUpdateCore(ctx context.Context, signatureSlot ui
 		return nil, nil, fmt.Errorf("failed to get finalized block SSZ: %w", err)
 	}
 
-	parsedFinalizedBlock, err := ParseBeaconBlockSSZ(finalizedBlockSSZ, version, forkSpec)
+	parsedFinalizedBlock, err := ParseBeaconBlockSSZWithPreset(finalizedBlockSSZ, version, forkSpec, pr.config.IsMainnetPreset())
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse finalized block SSZ: %w", err)
 	}
@@ -774,7 +774,7 @@ func (pr *Prover) buildConsensusUpdateWithSlots(ctx context.Context, signatureSl
 		return nil, nil, fmt.Errorf("failed to get signature block SSZ: %w", err)
 	}
 
-	parsedSignatureBlock, err := ParseBeaconBlockSSZ(signatureBlockSSZ, version, forkSpec)
+	parsedSignatureBlock, err := ParseBeaconBlockSSZWithPreset(signatureBlockSSZ, version, forkSpec, pr.config.IsMainnetPreset())
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse signature block SSZ: %w", err)
 	}
@@ -785,7 +785,7 @@ func (pr *Prover) buildConsensusUpdateWithSlots(ctx context.Context, signatureSl
 		return nil, nil, fmt.Errorf("failed to get attested block SSZ: %w", err)
 	}
 
-	parsedAttestedBlock, err := ParseBeaconBlockSSZ(attestedBlockSSZ, version, forkSpec)
+	parsedAttestedBlock, err := ParseBeaconBlockSSZWithPreset(attestedBlockSSZ, version, forkSpec, pr.config.IsMainnetPreset())
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse attested block SSZ: %w", err)
 	}
@@ -796,7 +796,7 @@ func (pr *Prover) buildConsensusUpdateWithSlots(ctx context.Context, signatureSl
 		return nil, nil, fmt.Errorf("failed to get attested state SSZ: %w", err)
 	}
 
-	parsedState, err := ParseBeaconStateSSZ(attestedStateSSZ, version, forkSpec)
+	parsedState, err := ParseBeaconStateSSZWithPreset(attestedStateSSZ, version, forkSpec, pr.config.IsMainnetPreset())
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse attested state SSZ: %w", err)
 	}
@@ -812,7 +812,7 @@ func (pr *Prover) buildConsensusUpdateWithSlots(ctx context.Context, signatureSl
 		return nil, nil, fmt.Errorf("failed to get finalized block SSZ: %w", err)
 	}
 
-	parsedFinalizedBlock, err := ParseBeaconBlockSSZ(finalizedBlockSSZ, version, forkSpec)
+	parsedFinalizedBlock, err := ParseBeaconBlockSSZWithPreset(finalizedBlockSSZ, version, forkSpec, pr.config.IsMainnetPreset())
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse finalized block SSZ: %w", err)
 	}
