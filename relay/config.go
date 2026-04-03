@@ -12,10 +12,11 @@ import (
 )
 
 const (
-	Mainnet = "mainnet"
-	Minimal = "minimal"
-	Sepolia = "sepolia"
-	Devnet  = "devnet" // Uses mainnet preset with custom fork schedule (all forks at epoch 0)
+	Mainnet        = "mainnet"
+	Minimal        = "minimal"
+	Sepolia        = "sepolia"
+	Devnet         = "devnet"          // Uses mainnet preset with custom fork schedule
+	KurtosisDevnet = "kurtosis_devnet" // Uses mainnet preset with custom fork schedule
 )
 
 const (
@@ -185,7 +186,7 @@ func (prc *ProverConfig) getForkParameters() *lctypes.ForkParameters {
 				},
 			},
 		}
-	case Minimal:
+	case Minimal, Devnet:
 		return &lctypes.ForkParameters{
 			GenesisForkVersion: []byte{0, 0, 0, 1},
 			Forks: []*lctypes.Fork{
@@ -258,39 +259,39 @@ func (prc *ProverConfig) getForkParameters() *lctypes.ForkParameters {
 				},
 			},
 		}
-	case Devnet:
+	case KurtosisDevnet:
 		// Devnet uses mainnet preset but all forks at epoch 0 (like Kurtosis devnet)
 		return &lctypes.ForkParameters{
 			GenesisForkVersion: []byte{0x10, 0x00, 0x00, 0x00},
 			Forks: []*lctypes.Fork{
 				{
 					Version: []byte{0x20, 0x00, 0x00, 0x00},
-					Epoch:   0,
+					Epoch:   prc.MinimalForkSched[Altair],
 					Spec:    &AltairSpec,
 				},
 				{
 					Version: []byte{0x30, 0x00, 0x00, 0x00},
-					Epoch:   0,
+					Epoch:   prc.MinimalForkSched[Bellatrix],
 					Spec:    &BellatrixSpec,
 				},
 				{
 					Version: []byte{0x40, 0x00, 0x00, 0x00},
-					Epoch:   0,
+					Epoch:   prc.MinimalForkSched[Capella],
 					Spec:    &CapellaSpec,
 				},
 				{
 					Version: []byte{0x50, 0x00, 0x00, 0x00},
-					Epoch:   0,
+					Epoch:   prc.MinimalForkSched[Deneb],
 					Spec:    &DenebSpec,
 				},
 				{
 					Version: []byte{0x60, 0x00, 0x00, 0x00},
-					Epoch:   0,
+					Epoch:   prc.MinimalForkSched[Electra],
 					Spec:    &ElectraSpec,
 				},
 				{
 					Version: []byte{0x70, 0x00, 0x00, 0x00},
-					Epoch:   0,
+					Epoch:   prc.MinimalForkSched[Fulu],
 					Spec:    &FuluSpec,
 				},
 			},
