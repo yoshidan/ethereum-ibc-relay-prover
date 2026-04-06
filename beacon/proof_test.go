@@ -85,26 +85,6 @@ func TestComputeDescriptor(t *testing.T) {
 	}
 }
 
-func TestDescriptorToBitlist(t *testing.T) {
-	descriptor := []byte{0x24, 0x7e} // 00100100 01111110
-	bitlist := descriptorToBitlist(descriptor)
-
-	expected := []bool{
-		false, false, true, false, false, true, false, false, // 00100100
-		false, true, true, true, true, true, true, false, // 01111110
-	}
-
-	if len(bitlist) != len(expected) {
-		t.Errorf("bitlist length = %d, want %d", len(bitlist), len(expected))
-	}
-
-	for i, b := range expected {
-		if bitlist[i] != b {
-			t.Errorf("bitlist[%d] = %v, want %v", i, bitlist[i], b)
-		}
-	}
-}
-
 func TestComputeProofBitstrings(t *testing.T) {
 	// Test for gindex 169 = 10101001
 	branch, path := computeProofBitstrings("10101001")
@@ -254,7 +234,7 @@ func TestLodestarProofAPIIntegration(t *testing.T) {
 
 	// Test block proof for execution payload (gindex 25)
 	t.Run("BlockProof_ExecutionPayload", func(t *testing.T) {
-		res, err := client.GetBlockProof(ctx, "finalized", []uint64{BlockBodyExecutionPayloadGindex})
+		res, err := client.GetBlockProof(ctx, "finalized", []uint64{LodestarExecutionPayloadInBlockGindex})
 		if err != nil {
 			t.Fatalf("GetBlockProof failed: %v", err)
 		}

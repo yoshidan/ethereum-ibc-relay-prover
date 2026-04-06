@@ -9,15 +9,12 @@ import (
 // Gindex constants for different forks
 const (
 	// Deneb gindices
-	FinalizedRootGindexDeneb          = 105
-	CurrentSyncCommitteeGindexDeneb   = 54
-	NextSyncCommitteeGindexDeneb      = 55
-	BlockBodyExecutionPayloadGindex   = 25
+	FinalizedRootGindexDeneb        = 105
+	NextSyncCommitteeGindexDeneb    = 55
 
 	// Electra/Fulu gindices (post-Electra)
-	FinalizedRootGindexElectra        = 169
-	CurrentSyncCommitteeGindexElectra = 86
-	NextSyncCommitteeGindexElectra    = 87
+	FinalizedRootGindexElectra      = 169
+	NextSyncCommitteeGindexElectra  = 87
 
 	// Lodestar proof API gindices
 	// The Lodestar /eth/v0/beacon/proof/block API uses a virtual tree structure where:
@@ -148,17 +145,6 @@ func ComputeDescriptor(gindices []uint64) []byte {
 	return descriptor
 }
 
-// descriptorToBitlist converts a descriptor byte array to a boolean bitlist
-func descriptorToBitlist(descriptor []byte) []bool {
-	bitlist := make([]bool, len(descriptor)*8)
-	for i, b := range descriptor {
-		for j := 0; j < 8; j++ {
-			bitlist[i*8+j] = (b & (1 << (7 - j))) != 0
-		}
-	}
-	return bitlist
-}
-
 // ExtractSingleProofBranch extracts a proof branch for a single gindex from CompactMultiProof leaves
 // The leaves are returned in in-order traversal (lexicographic order of gindex bitstrings)
 // Returns the branch in order from leaf-level sibling to root-level sibling
@@ -240,16 +226,6 @@ func GetFinalizedRootGindex(version string) uint64 {
 		return FinalizedRootGindexDeneb
 	default: // electra, fulu, and future forks use the Electra gindex
 		return FinalizedRootGindexElectra
-	}
-}
-
-// GetCurrentSyncCommitteeGindex returns the current sync committee gindex for the given version
-func GetCurrentSyncCommitteeGindex(version string) uint64 {
-	switch version {
-	case "deneb":
-		return CurrentSyncCommitteeGindexDeneb
-	default:
-		return CurrentSyncCommitteeGindexElectra
 	}
 }
 
