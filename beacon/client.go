@@ -125,9 +125,14 @@ func (cl Client) GetBeaconBlock(ctx context.Context, blockId string) (*BeaconBlo
 	return &res, nil
 }
 
-// GetBeaconBlockSSZ retrieves a beacon block in SSZ format
-func (cl Client) GetBeaconBlockSSZ(ctx context.Context, blockId string) ([]byte, error) {
-	return cl.getSSZ(ctx, fmt.Sprintf("/eth/v2/beacon/blocks/%s", blockId))
+// GetBeaconBlockHeader retrieves a beacon block header by block_id
+// The header includes the body_root computed by the beacon node
+func (cl Client) GetBeaconBlockHeader(ctx context.Context, blockId string) (*BeaconBlockHeaderResponse, error) {
+	var res BeaconBlockHeaderResponse
+	if err := cl.get(ctx, fmt.Sprintf("/eth/v1/beacon/headers/%s", blockId), &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
 }
 
 // GetFinalityCheckpointsAtState retrieves finality checkpoints for a specific state
@@ -243,26 +248,3 @@ func (cl Client) post(ctx context.Context, path string, body any, res any) error
 	return json.Unmarshal(bz, &res)
 }
 
-func (cl Client) getSSZ(ctx context.Context, path string) ([]byte, error) {
-	log.GetLogger().DebugContext(ctx, "Beacon API SSZ request", "endpoint", cl.endpoint+path)
-	req, err := http.NewRequestWithContext(ctx, "GET", cl.endpoint+path, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/octet-stream")
-
-	r, err := httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer r.Body.Close()
-	bz, err := io.ReadAll(r.Body)
-	if err != nil {
-		return nil, err
-	}
-	if r.StatusCode < 200 || r.StatusCode >= 300 {
-		log.GetLogger().DebugContext(ctx, "Non 2xx response to Beacon API SSZ request", "endpoint", cl.endpoint+path, "status code", r.StatusCode)
-		return nil, fmt.Errorf("request returned status code %d", r.StatusCode)
-	}
-	return bz, nil
-}

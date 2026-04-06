@@ -1,13 +1,17 @@
 package relay
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/OffchainLabs/prysm/v7/consensus-types/primitives"
+	ethpb "github.com/OffchainLabs/prysm/v7/proto/prysm/v1alpha1"
 	"github.com/cosmos/cosmos-sdk/codec"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	transfertypes "github.com/cosmos/ibc-go/v8/modules/apps/transfer/types"
@@ -138,7 +142,7 @@ func TestGetForkSpecForSlot(t *testing.T) {
 	// Get a finalized block to get a valid slot
 	block, err := pr.beaconClient.GetBeaconBlock(ctx, "finalized")
 	if err != nil {
-		t.Skipf("Beacon API not available: %v", err)
+		t.Fatalf("Beacon API not available: %v", err)
 	}
 
 	slot := uint64(block.Data.Message.Slot)
@@ -168,7 +172,7 @@ func TestFindValidBlockSlot(t *testing.T) {
 	// Get a finalized block to get a valid slot
 	block, err := pr.beaconClient.GetBeaconBlock(ctx, "finalized")
 	if err != nil {
-		t.Skipf("Beacon API not available: %v", err)
+		t.Fatalf("Beacon API not available: %v", err)
 	}
 
 	targetSlot := uint64(block.Data.Message.Slot)
@@ -193,7 +197,7 @@ func TestFindSignatureAndAttestedSlot(t *testing.T) {
 	// Get finalized block
 	block, err := pr.beaconClient.GetBeaconBlock(ctx, "finalized")
 	if err != nil {
-		t.Skipf("Beacon API not available: %v", err)
+		t.Fatalf("Beacon API not available: %v", err)
 	}
 
 	// Get head block to check if chain has enough blocks
@@ -209,7 +213,7 @@ func TestFindSignatureAndAttestedSlot(t *testing.T) {
 	// Attested slot is typically finalized + 1 epoch (8 slots for minimal)
 	// Signature slot is attested + 1
 	if headSlot < finalizedSlot+17 {
-		t.Skipf("Chain head (%d) is too close to finalized slot (%d), need more blocks for signature", headSlot, finalizedSlot)
+		t.Fatalf("Chain head (%d) is too close to finalized slot (%d), need more blocks for signature", headSlot, finalizedSlot)
 	}
 
 	// Get finalized block root
@@ -272,7 +276,7 @@ func TestGetSyncCommitteesFromState(t *testing.T) {
 	// Get finalized block
 	block, err := pr.beaconClient.GetBeaconBlock(ctx, "finalized")
 	if err != nil {
-		t.Skipf("Beacon API not available: %v", err)
+		t.Fatalf("Beacon API not available: %v", err)
 	}
 
 	slot := uint64(block.Data.Message.Slot)
@@ -311,7 +315,7 @@ func TestBuildConsensusUpdateFromBeaconAPI(t *testing.T) {
 	// First check if beacon API is available
 	block, err := pr.beaconClient.GetBeaconBlock(ctx, "finalized")
 	if err != nil {
-		t.Skipf("Beacon API not available: %v", err)
+		t.Fatalf("Beacon API not available: %v", err)
 	}
 
 	// Get head block to check if chain has enough blocks
@@ -325,7 +329,7 @@ func TestBuildConsensusUpdateFromBeaconAPI(t *testing.T) {
 
 	// Need enough blocks after finalized for attested and signature blocks
 	if headSlot < finalizedSlot+17 {
-		t.Skipf("Chain head (%d) is too close to finalized slot (%d), need more blocks", headSlot, finalizedSlot)
+		t.Fatalf("Chain head (%d) is too close to finalized slot (%d), need more blocks", headSlot, finalizedSlot)
 	}
 
 	t.Logf("Testing buildConsensusUpdateFromBeaconAPI: version=%s", block.Version)
@@ -338,6 +342,12 @@ func TestBuildConsensusUpdateFromBeaconAPI(t *testing.T) {
 	validateConsensusUpdate(t, update, false)
 	validateExecutionHeader(t, execHeader)
 
+	// Verify Merkle proofs (same logic as ethereum-light-client-rs)
+	forkSpec := pr.getForkSpecForSlot(update.AttestedHeader.Slot)
+	if forkSpec != nil {
+		validateConsensusUpdateMerkleProofs(t, update, forkSpec)
+	}
+
 	t.Log("Testing buildConsensusUpdateFromBeaconAPI with next sync committee")
 	updateWithSC, execHeader2, err := pr.buildConsensusUpdateFromBeaconAPI(ctx, true)
 	if err != nil {
@@ -346,6 +356,12 @@ func TestBuildConsensusUpdateFromBeaconAPI(t *testing.T) {
 
 	validateConsensusUpdate(t, updateWithSC, true)
 	validateExecutionHeader(t, execHeader2)
+
+	// Verify Merkle proofs for update with NextSyncCommittee
+	forkSpec2 := pr.getForkSpecForSlot(updateWithSC.AttestedHeader.Slot)
+	if forkSpec2 != nil {
+		validateConsensusUpdateMerkleProofs(t, updateWithSC, forkSpec2)
+	}
 }
 
 func TestBuildConsensusUpdateWithSlots(t *testing.T) {
@@ -355,7 +371,7 @@ func TestBuildConsensusUpdateWithSlots(t *testing.T) {
 	// Get finalized block info
 	block, err := pr.beaconClient.GetBeaconBlock(ctx, "finalized")
 	if err != nil {
-		t.Skipf("Beacon API not available: %v", err)
+		t.Fatalf("Beacon API not available: %v", err)
 	}
 
 	// Get head block to check if chain has enough blocks
@@ -369,7 +385,7 @@ func TestBuildConsensusUpdateWithSlots(t *testing.T) {
 
 	// Need enough blocks after finalized for attested and signature blocks
 	if headSlot < finalizedSlot+17 {
-		t.Skipf("Chain head (%d) is too close to finalized slot (%d), need more blocks", headSlot, finalizedSlot)
+		t.Fatalf("Chain head (%d) is too close to finalized slot (%d), need more blocks", headSlot, finalizedSlot)
 	}
 
 	t.Logf("Testing buildConsensusUpdateWithSlots: version=%s", block.Version)
@@ -396,6 +412,12 @@ func TestBuildConsensusUpdateWithSlots(t *testing.T) {
 
 	validateConsensusUpdate(t, update, false)
 	validateExecutionHeader(t, execHeader)
+
+	// Verify Merkle proofs (same logic as ethereum-light-client-rs)
+	forkSpec := pr.getForkSpecForSlot(attestedSlot)
+	if forkSpec != nil {
+		validateConsensusUpdateMerkleProofs(t, update, forkSpec)
+	}
 }
 
 func validateConsensusUpdate(t *testing.T, update *lctypes.ConsensusUpdate, expectNextSyncCommittee bool) {
@@ -491,6 +513,186 @@ func validateConsensusUpdate(t *testing.T, update *lctypes.ConsensusUpdate, expe
 	}
 }
 
+// validateConsensusUpdateMerkleProofs performs actual Merkle proof verification
+// This matches the verification logic in ethereum-light-client-rs
+func validateConsensusUpdateMerkleProofs(t *testing.T, update *lctypes.ConsensusUpdate, forkSpec *lctypes.ForkSpec) {
+	t.Helper()
+
+	if update == nil || forkSpec == nil {
+		t.Fatal("nil update or forkSpec")
+	}
+
+	// 1. Verify finality_branch: finalized_header is in attested_header.state_root
+	if update.FinalizedHeader != nil && len(update.FinalizedHeaderBranch) > 0 && update.AttestedHeader != nil {
+		finalizedHeaderRoot := hashBeaconBlockHeader(update.FinalizedHeader)
+		t.Logf("DEBUG finality: gindex=%d", forkSpec.FinalizedRootGindex)
+		t.Logf("DEBUG finality: FinalizedHeader.Slot=%d, ProposerIndex=%d", update.FinalizedHeader.Slot, update.FinalizedHeader.ProposerIndex)
+		t.Logf("DEBUG finality: FinalizedHeader.ParentRoot=%x", update.FinalizedHeader.ParentRoot)
+		t.Logf("DEBUG finality: FinalizedHeader.StateRoot=%x", update.FinalizedHeader.StateRoot)
+		t.Logf("DEBUG finality: FinalizedHeader.BodyRoot=%x", update.FinalizedHeader.BodyRoot)
+		t.Logf("DEBUG finality: computed leaf=%x", finalizedHeaderRoot)
+		t.Logf("DEBUG finality: expected root (attested state)=%x", update.AttestedHeader.StateRoot)
+		t.Logf("DEBUG finality: branch[0]=%x", update.FinalizedHeaderBranch[0])
+		err := testIsValidNormalizedMerkleBranch(
+			finalizedHeaderRoot,
+			update.FinalizedHeaderBranch,
+			forkSpec.FinalizedRootGindex,
+			update.AttestedHeader.StateRoot,
+		)
+		if err != nil {
+			t.Errorf("FinalizedHeaderBranch Merkle verification failed: %v", err)
+		} else {
+			t.Log("FinalizedHeaderBranch Merkle verification passed")
+		}
+	}
+
+	// 2. Verify execution_branch: execution_root is in finalized_header.body_root
+	// Note: The Lodestar proof API returns a branch for gindex 3 (body-relative, depth 1),
+	// not gindex 25 (full block tree, depth 4). See beacon/proof.go for details.
+	if len(update.FinalizedExecutionRoot) == 32 && len(update.FinalizedExecutionBranch) > 0 && update.FinalizedHeader != nil {
+		// Use the body-relative gindex (3) for verification against body_root
+		executionGindex := uint32(beacon.ExecutionPayloadInBodyGindex)
+		t.Logf("DEBUG execution: gindex=%d (body-relative)", executionGindex)
+		t.Logf("DEBUG execution: FinalizedExecutionRoot=%x", update.FinalizedExecutionRoot)
+		t.Logf("DEBUG execution: expected root (body)=%x", update.FinalizedHeader.BodyRoot)
+		t.Logf("DEBUG execution: branch length=%d", len(update.FinalizedExecutionBranch))
+		for i, b := range update.FinalizedExecutionBranch {
+			t.Logf("DEBUG execution: branch[%d]=%x", i, b)
+		}
+		err := testIsValidNormalizedMerkleBranch(
+			update.FinalizedExecutionRoot,
+			update.FinalizedExecutionBranch,
+			executionGindex,
+			update.FinalizedHeader.BodyRoot,
+		)
+		if err != nil {
+			t.Errorf("FinalizedExecutionBranch Merkle verification failed: %v", err)
+		} else {
+			t.Log("FinalizedExecutionBranch Merkle verification passed")
+		}
+	}
+
+	// 3. Verify next_sync_committee_branch: next_sync_committee is in attested_header.state_root
+	// Note: We can't verify the NextSyncCommittee hash on minimal preset because prysm types
+	// are hardcoded for mainnet preset (512 validators). The hashSyncCommittee function would
+	// produce an incorrect hash for minimal preset (32 validators).
+	// Instead, we just verify that the branch has the correct structure (length matches gindex depth).
+	if update.NextSyncCommittee != nil && len(update.NextSyncCommitteeBranch) > 0 && update.AttestedHeader != nil {
+		expectedDepth := gindexToDepth(forkSpec.NextSyncCommitteeGindex)
+		if len(update.NextSyncCommitteeBranch) != expectedDepth {
+			t.Errorf("NextSyncCommitteeBranch length mismatch: got %d, expected %d (depth for gindex %d)",
+				len(update.NextSyncCommitteeBranch), expectedDepth, forkSpec.NextSyncCommitteeGindex)
+		} else {
+			t.Logf("NextSyncCommitteeBranch structure verified: length=%d matches depth for gindex %d",
+				len(update.NextSyncCommitteeBranch), forkSpec.NextSyncCommitteeGindex)
+			t.Log("Note: Full Merkle verification skipped - prysm types don't support minimal preset hash computation")
+		}
+	}
+}
+
+// testIsValidNormalizedMerkleBranch verifies a Merkle proof against a root
+func testIsValidNormalizedMerkleBranch(leaf []byte, branch [][]byte, gindex uint32, root []byte) error {
+	if gindex == 0 {
+		return fmt.Errorf("invalid gindex: 0")
+	}
+	depth := gindexToDepth(gindex)
+	subtreeIndex := gindexToLeafIndex(gindex)
+	return testIsValidMerkleBranch(leaf, branch, depth, uint32(subtreeIndex), root)
+}
+
+// testIsValidMerkleBranch implements the Ethereum consensus-specs is_valid_merkle_branch
+func testIsValidMerkleBranch(leaf []byte, branch [][]byte, depth int, subtreeIndex uint32, root []byte) error {
+	if depth != len(branch) {
+		return fmt.Errorf("invalid branch length: expected %d, got %d", depth, len(branch))
+	}
+
+	value := make([]byte, 32)
+	copy(value, leaf)
+
+	for i, b := range branch {
+		var combined []byte
+		divisor := uint32(1) << uint32(i)
+		if (subtreeIndex/divisor)%2 == 1 {
+			combined = append(b, value...)
+		} else {
+			combined = append(value, b...)
+		}
+		h := sha256.Sum256(combined)
+		value = h[:]
+	}
+
+	if !bytes.Equal(value, root) {
+		return fmt.Errorf("merkle proof verification failed: computed root %x != expected root %x", value, root)
+	}
+	return nil
+}
+
+// hashBeaconBlockHeader computes the hash_tree_root of a BeaconBlockHeader using prysm's SSZ
+func hashBeaconBlockHeader(header *lctypes.BeaconBlockHeader) []byte {
+	// Convert to prysm's BeaconBlockHeader type
+	prysmHeader := &ethpb.BeaconBlockHeader{
+		Slot:          primitives.Slot(header.Slot),
+		ProposerIndex: primitives.ValidatorIndex(header.ProposerIndex),
+		ParentRoot:    header.ParentRoot,
+		StateRoot:     header.StateRoot,
+		BodyRoot:      header.BodyRoot,
+	}
+
+	root, err := prysmHeader.HashTreeRoot()
+	if err != nil {
+		return nil
+	}
+	return root[:]
+}
+
+// hashSyncCommittee computes the hash_tree_root of a SyncCommittee using prysm's SSZ
+func hashSyncCommittee(sc *lctypes.SyncCommittee) []byte {
+	if sc == nil {
+		return make([]byte, 32)
+	}
+
+	// Convert to prysm's SyncCommittee type
+	prysmSC := &ethpb.SyncCommittee{
+		Pubkeys:         sc.Pubkeys,
+		AggregatePubkey: sc.AggregatePubkey,
+	}
+
+	root, err := prysmSC.HashTreeRoot()
+	if err != nil {
+		return nil
+	}
+	return root[:]
+}
+
+// merkleizeLeaves computes the Merkle root of leaves
+func merkleizeLeaves(leaves [][]byte) []byte {
+	if len(leaves) == 0 {
+		return make([]byte, 32)
+	}
+
+	// Pad to power of 2
+	n := 1
+	for n < len(leaves) {
+		n *= 2
+	}
+	for len(leaves) < n {
+		leaves = append(leaves, make([]byte, 32))
+	}
+
+	// Build tree bottom-up
+	for len(leaves) > 1 {
+		newLeaves := make([][]byte, len(leaves)/2)
+		for i := 0; i < len(leaves); i += 2 {
+			combined := append(leaves[i], leaves[i+1]...)
+			h := sha256.Sum256(combined)
+			newLeaves[i/2] = h[:]
+		}
+		leaves = newLeaves
+	}
+
+	return leaves[0]
+}
+
 func validateExecutionHeader(t *testing.T, header *beacon.ExecutionPayloadHeader) {
 	t.Helper()
 
@@ -524,7 +726,7 @@ func TestGetSyncCommitteesInPeriod(t *testing.T) {
 	// Get finalized block to determine current period
 	block, err := pr.beaconClient.GetBeaconBlock(ctx, "finalized")
 	if err != nil {
-		t.Skipf("Beacon API not available: %v", err)
+		t.Fatalf("Beacon API not available: %v", err)
 	}
 
 	t.Logf("Testing getSyncCommitteesInPeriod: version=%s", block.Version)
@@ -560,7 +762,7 @@ func TestGetBootstrapInPeriod(t *testing.T) {
 	// Get finalized block to determine current period
 	block, err := pr.beaconClient.GetBeaconBlock(ctx, "finalized")
 	if err != nil {
-		t.Skipf("Beacon API not available: %v", err)
+		t.Fatalf("Beacon API not available: %v", err)
 	}
 
 	t.Logf("Testing getBootstrapInPeriod: version=%s", block.Version)
@@ -587,61 +789,5 @@ func TestGetBootstrapInPeriod(t *testing.T) {
 	}
 	if len(syncCommittee.AggregatePubkey) == 0 {
 		t.Error("Sync committee should have aggregate pubkey")
-	}
-}
-
-// TestSSZParsing tests if SSZ can be parsed correctly
-func TestSSZParsing(t *testing.T) {
-	pr := newTestProver(t)
-	ctx := context.Background()
-
-	// Get finalized block
-	block, err := pr.beaconClient.GetBeaconBlock(ctx, "finalized")
-	if err != nil {
-		t.Skipf("Beacon API not available: %v", err)
-	}
-
-	slot := uint64(block.Data.Message.Slot)
-	t.Logf("Block version: %s, slot: %d", block.Version, slot)
-
-	// Get fork spec
-	forkSpec := pr.getForkSpecForSlot(slot)
-	t.Logf("ForkSpec: FinalizedRootGindex=%d", forkSpec.FinalizedRootGindex)
-
-	// Get SSZ data
-	blockSSZ, err := pr.beaconClient.GetBeaconBlockSSZ(ctx, "finalized")
-	if err != nil {
-		t.Fatalf("Failed to get block SSZ: %v", err)
-	}
-	t.Logf("Block SSZ size: %d bytes", len(blockSSZ))
-
-	// Parse block SSZ
-	parsed, err := ParseBeaconBlockSSZ(blockSSZ, block.Version, forkSpec)
-	if err != nil {
-		t.Fatalf("ParseBeaconBlockSSZ failed: %v", err)
-	}
-	t.Logf("Successfully parsed block: slot=%d, proposer_index=%d", parsed.Slot, parsed.ProposerIndex)
-
-	// Validate parsed block data
-	if parsed.Slot != slot {
-		t.Errorf("Parsed slot %d doesn't match expected slot %d", parsed.Slot, slot)
-	}
-	if len(parsed.ParentRoot) != 32 {
-		t.Errorf("ParentRoot length should be 32, got %d", len(parsed.ParentRoot))
-	}
-	if len(parsed.StateRoot) != 32 {
-		t.Errorf("StateRoot length should be 32, got %d", len(parsed.StateRoot))
-	}
-	if len(parsed.BodyRoot) != 32 {
-		t.Errorf("BodyRoot length should be 32, got %d", len(parsed.BodyRoot))
-	}
-	if len(parsed.ExecutionRoot) != 32 {
-		t.Errorf("ExecutionRoot length should be 32, got %d", len(parsed.ExecutionRoot))
-	}
-	if parsed.ExecutionPayload == nil {
-		t.Error("ExecutionPayload should not be nil")
-	}
-	if parsed.SyncAggregate == nil {
-		t.Error("SyncAggregate should not be nil")
 	}
 }

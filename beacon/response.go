@@ -169,23 +169,30 @@ type Eth1DataJSON struct {
 }
 
 type ExecutionPayloadJSON struct {
-	ParentHash       hexutil.Bytes `json:"parent_hash"`
-	FeeRecipient     hexutil.Bytes `json:"fee_recipient"`
-	StateRoot        hexutil.Bytes `json:"state_root"`
-	ReceiptsRoot     hexutil.Bytes `json:"receipts_root"`
-	LogsBloom        hexutil.Bytes `json:"logs_bloom"`
-	PrevRandao       hexutil.Bytes `json:"prev_randao"`
-	BlockNumber      Uint64        `json:"block_number"`
-	GasLimit         Uint64        `json:"gas_limit"`
-	GasUsed          Uint64        `json:"gas_used"`
-	Timestamp        Uint64        `json:"timestamp"`
-	ExtraData        hexutil.Bytes `json:"extra_data"`
-	BaseFeePerGas    Uint64        `json:"base_fee_per_gas"`
-	BlockHash        hexutil.Bytes `json:"block_hash"`
-	TransactionsRoot hexutil.Bytes `json:"transactions_root"`
-	WithdrawalsRoot  hexutil.Bytes `json:"withdrawals_root"`
-	BlobGasUsed      Uint64        `json:"blob_gas_used"`
-	ExcessBlobGas    Uint64        `json:"excess_blob_gas"`
+	ParentHash    hexutil.Bytes   `json:"parent_hash"`
+	FeeRecipient  hexutil.Bytes   `json:"fee_recipient"`
+	StateRoot     hexutil.Bytes   `json:"state_root"`
+	ReceiptsRoot  hexutil.Bytes   `json:"receipts_root"`
+	LogsBloom     hexutil.Bytes   `json:"logs_bloom"`
+	PrevRandao    hexutil.Bytes   `json:"prev_randao"`
+	BlockNumber   Uint64          `json:"block_number"`
+	GasLimit      Uint64          `json:"gas_limit"`
+	GasUsed       Uint64          `json:"gas_used"`
+	Timestamp     Uint64          `json:"timestamp"`
+	ExtraData     hexutil.Bytes   `json:"extra_data"`
+	BaseFeePerGas Uint64          `json:"base_fee_per_gas"`
+	BlockHash     hexutil.Bytes   `json:"block_hash"`
+	Transactions  []hexutil.Bytes `json:"transactions"`
+	Withdrawals   []WithdrawalJSON `json:"withdrawals"`
+	BlobGasUsed   Uint64          `json:"blob_gas_used"`
+	ExcessBlobGas Uint64          `json:"excess_blob_gas"`
+}
+
+type WithdrawalJSON struct {
+	Index          Uint64        `json:"index"`
+	ValidatorIndex Uint64        `json:"validator_index"`
+	Address        hexutil.Bytes `json:"address"`
+	Amount         Uint64        `json:"amount"`
 }
 
 // SyncCommitteesResponse is the response from GET /eth/v1/beacon/states/{state_id}/sync_committees
@@ -236,4 +243,30 @@ type CompactMultiProofResponse struct {
 type CompactMultiProofData struct {
 	Leaves     []hexutil.Bytes `json:"leaves"`
 	Descriptor hexutil.Bytes   `json:"descriptor"`
+}
+
+// BeaconBlockHeaderResponse is the response from GET /eth/v1/beacon/headers/{block_id}
+type BeaconBlockHeaderResponse struct {
+	ExecutionOptimistic bool                      `json:"execution_optimistic"`
+	Finalized           bool                      `json:"finalized"`
+	Data                BeaconBlockHeaderRootData `json:"data"`
+}
+
+type BeaconBlockHeaderRootData struct {
+	Root      hexutil.Bytes                  `json:"root"`
+	Canonical bool                           `json:"canonical"`
+	Header    SignedBeaconBlockHeaderWrapper `json:"header"`
+}
+
+type SignedBeaconBlockHeaderWrapper struct {
+	Message   BeaconBlockHeaderFields `json:"message"`
+	Signature hexutil.Bytes           `json:"signature"`
+}
+
+type BeaconBlockHeaderFields struct {
+	Slot          Uint64        `json:"slot"`
+	ProposerIndex Uint64        `json:"proposer_index"`
+	ParentRoot    hexutil.Bytes `json:"parent_root"`
+	StateRoot     hexutil.Bytes `json:"state_root"`
+	BodyRoot      hexutil.Bytes `json:"body_root"`
 }

@@ -205,11 +205,10 @@ func TestExtractSingleProofBranch(t *testing.T) {
 
 // TestLodestarProofAPIIntegration tests the Lodestar proof API
 // This test requires a running Lodestar node
-// Set BEACON_ENDPOINT to enable this test (e.g., http://localhost:59014)
 func TestLodestarProofAPIIntegration(t *testing.T) {
 	endpoint := os.Getenv("BEACON_ENDPOINT")
 	if endpoint == "" {
-		t.Skip("BEACON_ENDPOINT is not set, skipping Lodestar proof API integration test")
+		endpoint = "http://localhost:59014"
 	}
 
 	initTestLogger()

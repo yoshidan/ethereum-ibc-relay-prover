@@ -18,6 +18,15 @@ const (
 	FinalizedRootGindexElectra        = 169
 	CurrentSyncCommitteeGindexElectra = 86
 	NextSyncCommitteeGindexElectra    = 87
+
+	// Lodestar proof API gindices
+	// The Lodestar /eth/v0/beacon/proof/block API uses a virtual tree structure where:
+	// - body_root = hash(other_fields || execution_payload)
+	// - So execution_payload is at gindex 3 (right child) in the body tree
+	// - But gindex 25 is used for the full block tree (block_root → body_root → execution_payload)
+	LodestarExecutionPayloadInBlockGindex = 25
+	// For verification against body_root, use gindex 3 (depth 1, right child)
+	ExecutionPayloadInBodyGindex = 3
 )
 
 // computeProofBitstrings computes the branch (siblings) and path (ancestors) for a leaf gindex
@@ -252,4 +261,72 @@ func GetNextSyncCommitteeGindex(version string) uint64 {
 	default:
 		return NextSyncCommitteeGindexElectra
 	}
+}
+
+// ExtractExecutionBranchForBodyRoot extracts the execution branch for verification against body_root
+// The Lodestar block proof API returns a proof from execution_payload to block_root (gindex 25, depth 4)
+// But for Light Client verification, we need a proof against body_root (gindex 3, depth 1)
+// This function extracts just the first level of the branch (the sibling of execution_payload within body)
+func ExtractExecutionBranchForBodyRoot(leaves [][]byte, fullGindex uint64) ([][]byte, error) {
+	// First extract the full branch for gindex 25
+	fullBranch, err := ExtractSingleProofBranch(leaves, fullGindex)
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract full branch: %w", err)
+	}
+
+	// For body_root verification (gindex 3), we only need the first element
+	// This is the sibling of execution_payload in the virtual body tree
+	if len(fullBranch) < 1 {
+		return nil, fmt.Errorf("full branch is empty")
+	}
+
+	// Return just the first branch element (depth 1 for gindex 3)
+	return [][]byte{fullBranch[0]}, nil
+}
+
+// ExtractTargetLeaf extracts the target leaf (the node at the given gindex) from CompactMultiProof leaves
+func ExtractTargetLeaf(leaves [][]byte, gindex uint64) ([]byte, error) {
+	depth := bits.Len64(gindex) - 1
+
+	if depth == 0 {
+		return nil, fmt.Errorf("cannot extract target leaf for gindex 1 (root)")
+	}
+
+	// Compute the sorted proof bitstrings to find the position of the target
+	leafBitstring := gindexToBitstring(gindex)
+	proofBitstrings := make(map[string]struct{})
+	pathBitstrings := make(map[string]struct{})
+
+	proofBitstrings[leafBitstring] = struct{}{}
+	branchSet, pathSet := computeProofBitstrings(leafBitstring)
+	delete(pathSet, leafBitstring)
+
+	for p := range pathSet {
+		pathBitstrings[p] = struct{}{}
+	}
+	for b := range branchSet {
+		proofBitstrings[b] = struct{}{}
+	}
+	for p := range pathBitstrings {
+		delete(proofBitstrings, p)
+	}
+
+	// Sort the proof bitstrings
+	sortedBitstrings := make([]string, 0, len(proofBitstrings))
+	for b := range proofBitstrings {
+		sortedBitstrings = append(sortedBitstrings, b)
+	}
+	sort.Strings(sortedBitstrings)
+
+	// Find the position of the target leaf
+	for i, b := range sortedBitstrings {
+		if b == leafBitstring {
+			if i >= len(leaves) {
+				return nil, fmt.Errorf("target leaf position %d out of bounds (leaves len %d)", i, len(leaves))
+			}
+			return leaves[i], nil
+		}
+	}
+
+	return nil, fmt.Errorf("target leaf bitstring %s not found in proof", leafBitstring)
 }

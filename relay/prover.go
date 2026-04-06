@@ -2,12 +2,14 @@ package relay
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/OffchainLabs/prysm/v7/crypto/bls"
+	"github.com/OffchainLabs/prysm/v7/encoding/ssz"
 	"github.com/cosmos/cosmos-sdk/codec"
 	clienttypes "github.com/cosmos/ibc-go/v8/modules/core/02-client/types"
 	ibcexported "github.com/cosmos/ibc-go/v8/modules/core/exported"
@@ -17,6 +19,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/hyperledger-labs/yui-relayer/core"
 	"github.com/hyperledger-labs/yui-relayer/log"
+	fastssz "github.com/prysmaticlabs/fastssz"
 )
 
 var IBCCommitmentsSlot = common.HexToHash("1ee222554989dda120e26ecacf756fe1235cd8d726706b57517715dde4f0c900")
@@ -723,47 +726,47 @@ func (pr *Prover) buildConsensusUpdateForPeriod(ctx context.Context, period uint
 }
 
 // buildConsensusUpdateWithSlots builds ConsensusUpdate with explicitly provided signature and attested slots
+// This function uses the standard Beacon API for header data (body_root) and JSON API for other data,
+// which works correctly for both mainnet and minimal presets.
 func (pr *Prover) buildConsensusUpdateWithSlots(ctx context.Context, signatureSlot, attestedSlot uint64, finalizedBlockId string, version string, includeNextSyncCommittee bool) (*lctypes.ConsensusUpdate, *beacon.ExecutionPayloadHeader, error) {
-	forkSpec := pr.getForkSpecForSlot(signatureSlot)
-	if forkSpec == nil {
-		return nil, nil, fmt.Errorf("no fork spec found for slot %d", signatureSlot)
+	// Get block headers from API (these include body_root computed by the beacon node)
+	attestedBlockHeader, err := pr.beaconClient.GetBeaconBlockHeader(ctx, fmt.Sprintf("%d", attestedSlot))
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get attested block header: %w", err)
 	}
 
-	// Get signature block SSZ (contains sync_aggregate that signs the attested block)
-	signatureBlockSSZ, err := pr.beaconClient.GetBeaconBlockSSZ(ctx, fmt.Sprintf("%d", signatureSlot))
+	finalizedBlockHeader, err := pr.beaconClient.GetBeaconBlockHeader(ctx, finalizedBlockId)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get signature block SSZ: %w", err)
+		return nil, nil, fmt.Errorf("failed to get finalized block header: %w", err)
 	}
 
-	parsedSignatureBlock, err := ParseBeaconBlockSSZ(signatureBlockSSZ, version, forkSpec)
+	// Get signature block JSON for sync_aggregate
+	signatureBlock, err := pr.beaconClient.GetBeaconBlock(ctx, fmt.Sprintf("%d", signatureSlot))
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse signature block SSZ: %w", err)
+		return nil, nil, fmt.Errorf("failed to get signature block: %w", err)
 	}
 
-	// Get attested block SSZ directly using the provided slot
-	attestedBlockSSZ, err := pr.beaconClient.GetBeaconBlockSSZ(ctx, fmt.Sprintf("%d", attestedSlot))
+	// Get finalized block JSON for execution payload
+	finalizedBlock, err := pr.beaconClient.GetBeaconBlock(ctx, finalizedBlockId)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get attested block SSZ: %w", err)
+		return nil, nil, fmt.Errorf("failed to get finalized block: %w", err)
 	}
 
-	parsedAttestedBlock, err := ParseBeaconBlockSSZ(attestedBlockSSZ, version, forkSpec)
+	// Convert execution payload from JSON to header format (for return value)
+	executionPayload, err := convertExecutionPayloadFromJSON(&finalizedBlock.Data.Message.Body.ExecutionPayload)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse attested block SSZ: %w", err)
+		return nil, nil, fmt.Errorf("failed to convert execution payload: %w", err)
 	}
 
-	// Get finalized block SSZ for execution payload data
-	finalizedBlockSSZ, err := pr.beaconClient.GetBeaconBlockSSZ(ctx, finalizedBlockId)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get finalized block SSZ: %w", err)
-	}
-
-	parsedFinalizedBlock, err := ParseBeaconBlockSSZ(finalizedBlockSSZ, version, forkSpec)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse finalized block SSZ: %w", err)
+	// Convert sync aggregate from JSON
+	syncAggregate := &lctypes.SyncAggregate{
+		SyncCommitteeBits:      signatureBlock.Data.Message.Body.SyncAggregate.SyncCommitteeBits,
+		SyncCommitteeSignature: signatureBlock.Data.Message.Body.SyncAggregate.SyncCommitteeSignature,
 	}
 
 	// Use Lodestar proof API for branches
 	var finalityBranch, nextSyncCommitteeBranch, executionBranch [][]byte
+	var executionRoot []byte
 	var nextSyncCommittee *lctypes.SyncCommittee
 
 	attestedStateId := fmt.Sprintf("%d", attestedSlot)
@@ -780,42 +783,39 @@ func (pr *Prover) buildConsensusUpdateWithSlots(ctx context.Context, signatureSl
 		}
 	}
 
-	// Try to use proof API for execution branch
-	executionBranch, err = pr.getExecutionBranchFromProofAPI(ctx, finalizedBlockId)
+	// Get execution branch and root from proof API
+	// Note: We use the execution_root from the proof API rather than computing it ourselves
+	// because our JSON-based computation may not match for all network presets
+	executionBranch, executionRoot, err = pr.getExecutionBranchFromProofAPI(ctx, finalizedBlockId)
 	if err != nil {
-		pr.GetLogger().DebugContext(ctx, "proof API for execution branch not available, falling back to local computation", "err", err)
-		// Fall back to local computation from block body
-		executionBranch, err = parsedFinalizedBlock.GenerateExecutionPayloadBranch()
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to generate execution branch: %w", err)
-		}
+		return nil, nil, fmt.Errorf("failed to get execution branch from proof API: %w", err)
 	}
 
 	pr.GetLogger().DebugContext(ctx, "building consensus update with slots",
 		"signature_slot", signatureSlot,
 		"attested_slot", attestedSlot,
-		"finalized_slot", parsedFinalizedBlock.Slot)
+		"finalized_slot", uint64(finalizedBlockHeader.Data.Header.Message.Slot))
 
-	// Build ConsensusUpdate
+	// Build ConsensusUpdate using header data from API
 	update := &lctypes.ConsensusUpdate{
 		AttestedHeader: &lctypes.BeaconBlockHeader{
-			Slot:          parsedAttestedBlock.Slot,
-			ProposerIndex: parsedAttestedBlock.ProposerIndex,
-			ParentRoot:    parsedAttestedBlock.ParentRoot,
-			StateRoot:     parsedAttestedBlock.StateRoot,
-			BodyRoot:      parsedAttestedBlock.BodyRoot,
+			Slot:          uint64(attestedBlockHeader.Data.Header.Message.Slot),
+			ProposerIndex: uint64(attestedBlockHeader.Data.Header.Message.ProposerIndex),
+			ParentRoot:    attestedBlockHeader.Data.Header.Message.ParentRoot,
+			StateRoot:     attestedBlockHeader.Data.Header.Message.StateRoot,
+			BodyRoot:      attestedBlockHeader.Data.Header.Message.BodyRoot,
 		},
 		FinalizedHeader: &lctypes.BeaconBlockHeader{
-			Slot:          parsedFinalizedBlock.Slot,
-			ProposerIndex: parsedFinalizedBlock.ProposerIndex,
-			ParentRoot:    parsedFinalizedBlock.ParentRoot,
-			StateRoot:     parsedFinalizedBlock.StateRoot,
-			BodyRoot:      parsedFinalizedBlock.BodyRoot,
+			Slot:          uint64(finalizedBlockHeader.Data.Header.Message.Slot),
+			ProposerIndex: uint64(finalizedBlockHeader.Data.Header.Message.ProposerIndex),
+			ParentRoot:    finalizedBlockHeader.Data.Header.Message.ParentRoot,
+			StateRoot:     finalizedBlockHeader.Data.Header.Message.StateRoot,
+			BodyRoot:      finalizedBlockHeader.Data.Header.Message.BodyRoot,
 		},
 		FinalizedHeaderBranch:    finalityBranch,
-		FinalizedExecutionRoot:   parsedFinalizedBlock.ExecutionRoot,
+		FinalizedExecutionRoot:   executionRoot,
 		FinalizedExecutionBranch: executionBranch,
-		SyncAggregate:            parsedSignatureBlock.SyncAggregate,
+		SyncAggregate:            syncAggregate,
 		SignatureSlot:            signatureSlot,
 	}
 
@@ -825,7 +825,104 @@ func (pr *Prover) buildConsensusUpdateWithSlots(ctx context.Context, signatureSl
 		update.NextSyncCommitteeBranch = nextSyncCommitteeBranch
 	}
 
-	return update, parsedFinalizedBlock.ExecutionPayload, nil
+	return update, executionPayload, nil
+}
+
+// convertExecutionPayloadFromJSON converts ExecutionPayloadJSON to ExecutionPayloadHeader
+func convertExecutionPayloadFromJSON(ep *beacon.ExecutionPayloadJSON) (*beacon.ExecutionPayloadHeader, error) {
+	// Compute transactions root from raw transactions
+	txs := make([][]byte, len(ep.Transactions))
+	for i, tx := range ep.Transactions {
+		txs[i] = tx
+	}
+	transactionsRoot, err := computeTransactionsRoot(txs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute transactions root: %w", err)
+	}
+
+	// Compute withdrawals root from raw withdrawals
+	withdrawals := make([]*Withdrawal, len(ep.Withdrawals))
+	for i, w := range ep.Withdrawals {
+		withdrawals[i] = &Withdrawal{
+			Index:          uint64(w.Index),
+			ValidatorIndex: uint64(w.ValidatorIndex),
+			Address:        w.Address,
+			Amount:         uint64(w.Amount),
+		}
+	}
+	withdrawalsRoot, err := computeWithdrawalsRootFromWithdrawals(withdrawals)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute withdrawals root: %w", err)
+	}
+
+	return &beacon.ExecutionPayloadHeader{
+		ParentHash:       ep.ParentHash,
+		FeeRecipient:     ep.FeeRecipient,
+		StateRoot:        ep.StateRoot,
+		ReceiptsRoot:     ep.ReceiptsRoot,
+		LogsBloom:        ep.LogsBloom,
+		PrevRandao:       ep.PrevRandao,
+		BlockNumber:      uint64(ep.BlockNumber),
+		GasLimit:         uint64(ep.GasLimit),
+		GasUsed:          uint64(ep.GasUsed),
+		Timestamp:        uint64(ep.Timestamp),
+		ExtraData:        ep.ExtraData,
+		BaseFeePerGas:    bigIntTo32Bytes(ep.BaseFeePerGas),
+		BlockHash:        ep.BlockHash,
+		TransactionsRoot: transactionsRoot[:],
+		WithdrawalsRoot:  withdrawalsRoot[:],
+		BlobGasUsed:      uint64(ep.BlobGasUsed),
+		ExcessBlobGas:    uint64(ep.ExcessBlobGas),
+	}, nil
+}
+
+// Withdrawal is a simple representation of a withdrawal
+type Withdrawal struct {
+	Index          uint64
+	ValidatorIndex uint64
+	Address        []byte
+	Amount         uint64
+}
+
+// bigIntTo32Bytes converts a big.Int-like Uint64 to a 32-byte little-endian representation
+func bigIntTo32Bytes(v beacon.Uint64) []byte {
+	result := make([]byte, 32)
+	// BaseFeePerGas is stored as little-endian in SSZ
+	val := uint64(v)
+	for i := 0; i < 8; i++ {
+		result[i] = byte(val >> (8 * i))
+	}
+	return result
+}
+
+// computeWithdrawalsRootFromWithdrawals computes the SSZ root of withdrawals list
+func computeWithdrawalsRootFromWithdrawals(withdrawals []*Withdrawal) ([32]byte, error) {
+	// Hash each withdrawal
+	wRoots := make([][32]byte, len(withdrawals))
+	for i, w := range withdrawals {
+		hh := fastssz.NewHasher()
+		hh.PutUint64(w.Index)
+		hh.PutUint64(w.ValidatorIndex)
+		hh.PutBytes(w.Address)
+		hh.PutUint64(w.Amount)
+		root, err := hh.HashRoot()
+		if err != nil {
+			return [32]byte{}, fmt.Errorf("failed to compute withdrawal root %d: %w", i, err)
+		}
+		wRoots[i] = root
+	}
+
+	// Create Merkle tree from withdrawal roots
+	const MAX_WITHDRAWALS_PER_PAYLOAD = 16
+	root, err := ssz.BitwiseMerkleize(wRoots, uint64(len(wRoots)), MAX_WITHDRAWALS_PER_PAYLOAD)
+	if err != nil {
+		return [32]byte{}, err
+	}
+
+	// Mix in length
+	lengthBuf := make([]byte, 32)
+	binary.LittleEndian.PutUint64(lengthBuf, uint64(len(withdrawals)))
+	return ssz.MixInLength(root, lengthBuf), nil
 }
 
 // findValidBlockSlot finds a valid block slot at or before the target slot
@@ -902,22 +999,38 @@ func (pr *Prover) getBranchesFromProofAPI(ctx context.Context, stateId string, v
 		return nil, nil, fmt.Errorf("failed to extract next sync committee branch: %w", err)
 	}
 
+	// Extract the target leaf (next_sync_committee_root from beacon node)
+	// This is needed because prysm types are hardcoded for mainnet preset and can't compute
+	// the hash correctly for minimal preset
+	nextSyncCommitteeRoot, err := beacon.ExtractTargetLeaf(leaves, nextSyncCommitteeGindex)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to extract next sync committee root from proof: %w", err)
+	}
+
 	pr.GetLogger().DebugContext(ctx, "got next sync committee branch from proof API",
 		"stateId", stateId,
 		"version", version,
 		"gindex", nextSyncCommitteeGindex,
-		"branch_length", len(nextSyncCommitteeBranch))
+		"branch_length", len(nextSyncCommitteeBranch),
+		"next_sync_committee_root", fmt.Sprintf("%x", nextSyncCommitteeRoot))
 
 	return finalityBranch, nextSyncCommitteeBranch, nil
 }
 
-// getExecutionBranchFromProofAPI retrieves execution_branch using Lodestar's proof API
-func (pr *Prover) getExecutionBranchFromProofAPI(ctx context.Context, blockId string) ([][]byte, error) {
-	gindex := uint64(beacon.BlockBodyExecutionPayloadGindex)
+// getExecutionBranchFromProofAPI retrieves execution_branch and execution_root using Lodestar's proof API
+// Returns the branch for body_root verification and the execution_root (target leaf) from the proof
+//
+// Note: The Lodestar /eth/v0/beacon/proof/block API uses gindex 25 which provides a proof from
+// execution_payload to block_root (4 levels deep). However, for Light Client verification,
+// we need a proof against body_root (only 1 level deep, gindex 3).
+// This function extracts only the body-relative portion of the proof.
+func (pr *Prover) getExecutionBranchFromProofAPI(ctx context.Context, blockId string) (branch [][]byte, executionRoot []byte, err error) {
+	// Use gindex 25 to query the Lodestar proof API (execution_payload in full block tree)
+	fullGindex := uint64(beacon.LodestarExecutionPayloadInBlockGindex)
 
-	proofRes, err := pr.beaconClient.GetBlockProof(ctx, blockId, []uint64{gindex})
+	proofRes, err := pr.beaconClient.GetBlockProof(ctx, blockId, []uint64{fullGindex})
 	if err != nil {
-		return nil, fmt.Errorf("failed to get execution payload proof: %w", err)
+		return nil, nil, fmt.Errorf("failed to get execution payload proof: %w", err)
 	}
 
 	leaves := make([][]byte, len(proofRes.Data.Leaves))
@@ -925,18 +1038,27 @@ func (pr *Prover) getExecutionBranchFromProofAPI(ctx context.Context, blockId st
 		leaves[i] = l
 	}
 
-	branch, err := beacon.ExtractSingleProofBranch(leaves, gindex)
+	// Extract just the body-relative branch (gindex 3, depth 1) for body_root verification
+	branch, err = beacon.ExtractExecutionBranchForBodyRoot(leaves, fullGindex)
 	if err != nil {
-		return nil, fmt.Errorf("failed to extract execution branch: %w", err)
+		return nil, nil, fmt.Errorf("failed to extract execution branch for body root: %w", err)
 	}
 
-	pr.GetLogger().DebugContext(ctx, "got execution branch from proof API",
+	// Extract the target leaf (execution_root from beacon node)
+	executionRoot, err = beacon.ExtractTargetLeaf(leaves, fullGindex)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to extract execution root from proof: %w", err)
+	}
+
+	pr.GetLogger().DebugContext(ctx, "got execution branch and root from proof API",
 		"blockId", blockId,
 		"version", proofRes.Version,
-		"gindex", gindex,
-		"branch_length", len(branch))
+		"full_gindex", fullGindex,
+		"body_gindex", beacon.ExecutionPayloadInBodyGindex,
+		"branch_length", len(branch),
+		"execution_root", fmt.Sprintf("%x", executionRoot))
 
-	return branch, nil
+	return branch, executionRoot, nil
 }
 
 // getSyncCommitteesInPeriod retrieves current and next sync committees for a specific period

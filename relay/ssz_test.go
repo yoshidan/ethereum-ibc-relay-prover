@@ -1,30 +1,16 @@
 package relay
 
 import (
-	"context"
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"testing"
 
-	"github.com/datachainlab/ethereum-ibc-relay-prover/beacon"
+	lctypes "github.com/datachainlab/ethereum-ibc-relay-prover/light-clients/ethereum/types"
+	"github.com/OffchainLabs/prysm/v7/consensus-types/primitives"
+	ethpb "github.com/OffchainLabs/prysm/v7/proto/prysm/v1alpha1"
 )
-
-func newTestProverForSSZ(t *testing.T) *Prover {
-	initTestLogger()
-
-	endpoint := getBeaconEndpoint()
-	beaconClient := beacon.NewClient(endpoint)
-
-	// Create a devnet config for testing (mainnet preset with all forks at epoch 0)
-	config := ProverConfig{
-		Network:        "kurtosis_minimal",
-		BeaconEndpoint: endpoint,
-	}
-
-	return &Prover{
-		chain:        &mockChain{},
-		config:       config,
-		beaconClient: beaconClient,
-	}
-}
 
 func TestGindexToDepth(t *testing.T) {
 	tests := []struct {
@@ -86,54 +72,6 @@ func TestGindexToLeafIndex(t *testing.T) {
 	}
 }
 
-func TestToBytes32Slice(t *testing.T) {
-	input := [][]byte{
-		{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32},
-		{32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1},
-	}
-
-	result := toBytes32Slice(input)
-
-	if len(result) != len(input) {
-		t.Errorf("toBytes32Slice returned %d elements, expected %d", len(result), len(input))
-	}
-
-	for i := range input {
-		for j := 0; j < 32; j++ {
-			if result[i][j] != input[i][j] {
-				t.Errorf("toBytes32Slice[%d][%d] = %d, expected %d", i, j, result[i][j], input[i][j])
-			}
-		}
-	}
-}
-
-func TestToBytes32SliceWithShortInput(t *testing.T) {
-	// Test with input shorter than 32 bytes
-	input := [][]byte{
-		{1, 2, 3, 4, 5},
-	}
-
-	result := toBytes32Slice(input)
-
-	if len(result) != 1 {
-		t.Errorf("toBytes32Slice returned %d elements, expected 1", len(result))
-	}
-
-	// First 5 bytes should match
-	for i := 0; i < 5; i++ {
-		if result[0][i] != input[0][i] {
-			t.Errorf("toBytes32Slice[0][%d] = %d, expected %d", i, result[0][i], input[0][i])
-		}
-	}
-
-	// Remaining bytes should be zero
-	for i := 5; i < 32; i++ {
-		if result[0][i] != 0 {
-			t.Errorf("toBytes32Slice[0][%d] = %d, expected 0", i, result[0][i])
-		}
-	}
-}
-
 func TestGenerateMerkleProof(t *testing.T) {
 	// Create 4 leaves (power of 2)
 	leaves := [][]byte{
@@ -169,79 +107,6 @@ func TestGenerateMerkleProof(t *testing.T) {
 	}
 }
 
-func TestGenerateMerkleProofFromGindex(t *testing.T) {
-	// Create 16 leaves for depth 4
-	leaves := make([][]byte, 16)
-	for i := range leaves {
-		leaves[i] = make([]byte, 32)
-		leaves[i][0] = byte(i)
-	}
-
-	// Test with gindex 25 (depth 4, leaf index 9)
-	proof, err := generateMerkleProofFromGindex(leaves, 25)
-	if err != nil {
-		t.Fatalf("generateMerkleProofFromGindex failed: %v", err)
-	}
-
-	// Depth is 4, so proof should have 4 elements
-	if len(proof) != 4 {
-		t.Errorf("proof length = %d, expected 4", len(proof))
-	}
-}
-
-func TestSyncCommitteeToProto(t *testing.T) {
-	// Test nil input
-	result := syncCommitteeToProto(nil)
-	if result != nil {
-		t.Error("syncCommitteeToProto(nil) should return nil")
-	}
-}
-
-// TestParsedBeaconBlockGenerateExecutionBranch tests the execution branch generation
-func TestParsedBeaconBlockGenerateExecutionBranch(t *testing.T) {
-	// This test requires a beacon node to be running
-	pr := newTestProverForSSZ(t)
-	ctx := context.Background()
-
-	// Get finalized block info
-	block, err := pr.beaconClient.GetBeaconBlock(ctx, "finalized")
-	if err != nil {
-		t.Skipf("Beacon API not available: %v", err)
-	}
-
-	slot := uint64(block.Data.Message.Slot)
-	forkSpec := pr.getForkSpecForSlot(slot)
-	if forkSpec == nil {
-		t.Fatalf("getForkSpecForSlot returned nil for slot %d", slot)
-	}
-
-	// Get block SSZ
-	blockSSZ, err := pr.beaconClient.GetBeaconBlockSSZ(ctx, "finalized")
-	if err != nil {
-		t.Fatalf("Failed to get block SSZ: %v", err)
-	}
-
-	// Parse block
-	parsedBlock, err := ParseBeaconBlockSSZ(blockSSZ, block.Version, forkSpec)
-	if err != nil {
-		t.Fatalf("Failed to parse block SSZ: %v", err)
-	}
-
-	// Test execution branch generation
-	executionBranch, err := parsedBlock.GenerateExecutionPayloadBranch()
-	if err != nil {
-		t.Fatalf("GenerateExecutionPayloadBranch failed: %v", err)
-	}
-
-	expectedDepth := gindexToDepth(forkSpec.ExecutionPayloadGindex)
-	if len(executionBranch) != expectedDepth {
-		t.Errorf("Execution branch has %d elements, expected %d (depth for gindex %d)",
-			len(executionBranch), expectedDepth, forkSpec.ExecutionPayloadGindex)
-	}
-
-	t.Logf("Execution branch generated with %d elements for gindex %d", len(executionBranch), forkSpec.ExecutionPayloadGindex)
-}
-
 func TestGenerateMerkleProofEmpty(t *testing.T) {
 	_, err := generateMerkleProof([][]byte{}, 0)
 	if err == nil {
@@ -269,39 +134,6 @@ func TestGenerateMerkleProofNonPowerOfTwo(t *testing.T) {
 	// 3 leaves padded to 4, depth is 2
 	if len(proof) != 2 {
 		t.Errorf("proof length = %d, expected 2", len(proof))
-	}
-}
-
-func TestPackUint64s(t *testing.T) {
-	// Test packing 4 uint64s (exactly 1 chunk)
-	values := []uint64{1, 2, 3, 4}
-	chunks := packUint64s(values)
-	if len(chunks) != 1 {
-		t.Errorf("packUint64s returned %d chunks, expected 1", len(chunks))
-	}
-
-	// Verify the bytes are correct (little-endian)
-	expected := [32]byte{
-		1, 0, 0, 0, 0, 0, 0, 0, // 1
-		2, 0, 0, 0, 0, 0, 0, 0, // 2
-		3, 0, 0, 0, 0, 0, 0, 0, // 3
-		4, 0, 0, 0, 0, 0, 0, 0, // 4
-	}
-	if chunks[0] != expected {
-		t.Errorf("packUint64s chunk mismatch: got %v, expected %v", chunks[0], expected)
-	}
-
-	// Test packing 5 uint64s (2 chunks, second partially filled)
-	values2 := []uint64{1, 2, 3, 4, 5}
-	chunks2 := packUint64s(values2)
-	if len(chunks2) != 2 {
-		t.Errorf("packUint64s returned %d chunks, expected 2", len(chunks2))
-	}
-
-	// Test empty slice
-	emptyChunks := packUint64s([]uint64{})
-	if len(emptyChunks) != 0 {
-		t.Errorf("packUint64s returned %d chunks for empty input, expected 0", len(emptyChunks))
 	}
 }
 
@@ -349,5 +181,171 @@ func TestForkSpecGindexValues(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// isValidNormalizedMerkleBranch verifies a Merkle proof against a root
+// This matches the Rust implementation in ethereum-light-client-rs
+func isValidNormalizedMerkleBranch(leaf []byte, branch [][]byte, gindex uint32, root []byte) error {
+	if gindex == 0 {
+		return fmt.Errorf("invalid gindex: 0")
+	}
+	depth := gindexToDepth(gindex)
+	subtreeIndex := gindexToLeafIndex(gindex)
+	return isValidMerkleBranch(leaf, branch, depth, uint32(subtreeIndex), root)
+}
+
+// isValidMerkleBranch implements the Ethereum consensus-specs is_valid_merkle_branch
+// https://github.com/ethereum/consensus-specs/blob/dev/specs/phase0/beacon-chain.md#is_valid_merkle_branch
+func isValidMerkleBranch(leaf []byte, branch [][]byte, depth int, subtreeIndex uint32, root []byte) error {
+	if depth != len(branch) {
+		return fmt.Errorf("invalid branch length: expected %d, got %d", depth, len(branch))
+	}
+
+	value := make([]byte, 32)
+	copy(value, leaf)
+
+	for i, b := range branch {
+		var combined []byte
+		divisor := uint32(1) << uint32(i)
+		if (subtreeIndex/divisor)%2 == 1 {
+			// branch[i] is on the left
+			combined = append(b, value...)
+		} else {
+			// branch[i] is on the right
+			combined = append(value, b...)
+		}
+		value = sha256Hash(combined)
+	}
+
+	if !bytes.Equal(value, root) {
+		return fmt.Errorf("merkle proof verification failed: computed root %x != expected root %x", value, root)
+	}
+	return nil
+}
+
+// sha256Hash computes SHA256 hash
+func sha256Hash(data []byte) []byte {
+	h := sha256.Sum256(data)
+	return h[:]
+}
+
+func TestHashBeaconBlockHeader(t *testing.T) {
+	// Test with known values from slot 168
+	// Expected root from beacon API: 0xecc35dfed68b899cbe96c37ed9f7b22cee38a9cd35b79b6941b693106b16cd9e
+	parentRoot, _ := hex.DecodeString("e8634ef6a217c325ab6b6591f2eb404b9022b2e1a3a51509d69c214c599abfb9")
+	stateRoot, _ := hex.DecodeString("d9a2a961e5eeac47fabab7a4bd96937df04e02555dc219f7d04aa10b53ef5be5")
+	bodyRoot, _ := hex.DecodeString("f6495100a31305ffe427efe37b3414876267933cedac311868e07e46dc0c6fa6")
+
+	// Test using prysm's BeaconBlockHeader directly
+	prysmHeader := &ethpb.BeaconBlockHeader{
+		Slot:          primitives.Slot(168),
+		ProposerIndex: primitives.ValidatorIndex(13),
+		ParentRoot:    parentRoot,
+		StateRoot:     stateRoot,
+		BodyRoot:      bodyRoot,
+	}
+
+	prysmRoot, err := prysmHeader.HashTreeRoot()
+	if err != nil {
+		t.Fatalf("prysm HashTreeRoot failed: %v", err)
+	}
+
+	expectedRoot, _ := hex.DecodeString("ecc35dfed68b899cbe96c37ed9f7b22cee38a9cd35b79b6941b693106b16cd9e")
+
+	t.Logf("Prysm computed root: %x", prysmRoot)
+	t.Logf("Expected root:       %x", expectedRoot)
+
+	if !bytes.Equal(prysmRoot[:], expectedRoot) {
+		t.Errorf("Prysm hash mismatch: computed %x, expected %x", prysmRoot, expectedRoot)
+	}
+
+	// Also test our wrapper function
+	header := &lctypes.BeaconBlockHeader{
+		Slot:          168,
+		ProposerIndex: 13,
+		ParentRoot:    parentRoot,
+		StateRoot:     stateRoot,
+		BodyRoot:      bodyRoot,
+	}
+
+	// Convert to prysm type and hash
+	prysmHeader2 := &ethpb.BeaconBlockHeader{
+		Slot:          primitives.Slot(header.Slot),
+		ProposerIndex: primitives.ValidatorIndex(header.ProposerIndex),
+		ParentRoot:    header.ParentRoot,
+		StateRoot:     header.StateRoot,
+		BodyRoot:      header.BodyRoot,
+	}
+
+	root2, err := prysmHeader2.HashTreeRoot()
+	if err != nil {
+		t.Fatalf("HashTreeRoot failed: %v", err)
+	}
+
+	t.Logf("Wrapper computed root: %x", root2)
+
+	if !bytes.Equal(root2[:], expectedRoot) {
+		t.Errorf("Wrapper hash mismatch: computed %x, expected %x", root2, expectedRoot)
+	}
+}
+
+func TestIsValidMerkleBranch(t *testing.T) {
+	// Create 4 leaves
+	leaves := [][]byte{
+		make([]byte, 32),
+		make([]byte, 32),
+		make([]byte, 32),
+		make([]byte, 32),
+	}
+	leaves[0][0] = 1
+	leaves[1][0] = 2
+	leaves[2][0] = 3
+	leaves[3][0] = 4
+
+	// Compute the root manually
+	h01 := sha256Hash(append(leaves[0], leaves[1]...))
+	h23 := sha256Hash(append(leaves[2], leaves[3]...))
+	root := sha256Hash(append(h01, h23...))
+
+	// Generate and verify proof for leaf 0 (gindex = 4)
+	proof0, err := generateMerkleProof(leaves, 0)
+	if err != nil {
+		t.Fatalf("generateMerkleProof failed: %v", err)
+	}
+
+	err = isValidNormalizedMerkleBranch(leaves[0], proof0, 4, root)
+	if err != nil {
+		t.Errorf("isValidNormalizedMerkleBranch failed for leaf 0: %v", err)
+	}
+
+	// Generate and verify proof for leaf 2 (gindex = 6)
+	proof2, err := generateMerkleProof(leaves, 2)
+	if err != nil {
+		t.Fatalf("generateMerkleProof failed: %v", err)
+	}
+
+	err = isValidNormalizedMerkleBranch(leaves[2], proof2, 6, root)
+	if err != nil {
+		t.Errorf("isValidNormalizedMerkleBranch failed for leaf 2: %v", err)
+	}
+
+	// Test with wrong root - should fail
+	wrongRoot := make([]byte, 32)
+	err = isValidNormalizedMerkleBranch(leaves[0], proof0, 4, wrongRoot)
+	if err == nil {
+		t.Error("isValidNormalizedMerkleBranch should fail with wrong root")
+	}
+
+	// Test with corrupted branch - should fail
+	corruptedProof := make([][]byte, len(proof0))
+	for i := range proof0 {
+		corruptedProof[i] = make([]byte, 32)
+		copy(corruptedProof[i], proof0[i])
+	}
+	corruptedProof[0][0] ^= 0xFF // Flip some bits
+	err = isValidNormalizedMerkleBranch(leaves[0], corruptedProof, 4, root)
+	if err == nil {
+		t.Error("isValidNormalizedMerkleBranch should fail with corrupted branch")
 	}
 }
