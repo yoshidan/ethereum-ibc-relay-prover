@@ -48,27 +48,17 @@ func TestComputeDescriptor(t *testing.T) {
 		expectedHex string
 	}{
 		{
-			name:        "FINALIZED_ROOT_GINDEX_ELECTRA",
+			name:        "FINALIZED_ROOT_GINDEX",
 			gindices:    []uint64{169},
 			expectedHex: "247e",
 		},
 		{
-			name:        "FINALIZED_ROOT_GINDEX_DENEB",
-			gindices:    []uint64{105},
-			expectedHex: "48f8",
-		},
-		{
-			name:        "NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA",
+			name:        "NEXT_SYNC_COMMITTEE_GINDEX",
 			gindices:    []uint64{87},
 			expectedHex: "2578",
 		},
 		{
-			name:        "NEXT_SYNC_COMMITTEE_GINDEX_DENEB",
-			gindices:    []uint64{55},
-			expectedHex: "4ae0",
-		},
-		{
-			name:        "BLOCK_BODY_EXECUTION_PAYLOAD_GINDEX",
+			name:        "EXECUTION_PAYLOAD_GINDEX",
 			gindices:    []uint64{25},
 			expectedHex: "4780",
 		},
@@ -197,7 +187,7 @@ func TestLodestarProofAPIIntegration(t *testing.T) {
 
 	// Test state proof for finalized root (gindex 169 for Electra/Fulu)
 	t.Run("StateProof_FinalizedRoot", func(t *testing.T) {
-		res, err := client.GetStateProof(ctx, "finalized", []uint64{FinalizedRootGindexElectra})
+		res, err := client.GetStateProof(ctx, "finalized", []uint64{FinalizedRootGindex})
 		if err != nil {
 			t.Fatalf("GetStateProof failed: %v", err)
 		}
@@ -218,7 +208,7 @@ func TestLodestarProofAPIIntegration(t *testing.T) {
 
 	// Test state proof for next sync committee (gindex 87 for Electra/Fulu)
 	t.Run("StateProof_NextSyncCommittee", func(t *testing.T) {
-		res, err := client.GetStateProof(ctx, "finalized", []uint64{NextSyncCommitteeGindexElectra})
+		res, err := client.GetStateProof(ctx, "finalized", []uint64{NextSyncCommitteeGindex})
 		if err != nil {
 			t.Fatalf("GetStateProof failed: %v", err)
 		}

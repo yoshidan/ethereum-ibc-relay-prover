@@ -26,10 +26,8 @@ func TestGindexToDepth(t *testing.T) {
 		{"gindex 7", 7, 2},
 		{"gindex 8", 8, 3},
 		{"gindex 25 (execution payload)", 25, 4},
-		{"gindex 55 (next sync committee deneb)", 55, 5},
-		{"gindex 87 (next sync committee electra)", 87, 6},
-		{"gindex 105 (finalized root deneb)", 105, 6},
-		{"gindex 169 (finalized root electra)", 169, 7},
+		{"gindex 87 (next sync committee)", 87, 6},
+		{"gindex 169 (finalized root)", 169, 7},
 	}
 
 	for _, tt := range tests {
@@ -56,10 +54,8 @@ func TestGindexToLeafIndex(t *testing.T) {
 		{"gindex 6", 6, 2},
 		{"gindex 7", 7, 3},
 		{"gindex 25 (execution payload)", 25, 9},
-		{"gindex 55 (next sync committee deneb)", 55, 23},
-		{"gindex 87 (next sync committee electra)", 87, 23},
-		{"gindex 105 (finalized root deneb)", 105, 41},
-		{"gindex 169 (finalized root electra)", 169, 41},
+		{"gindex 87 (next sync committee)", 87, 23},
+		{"gindex 169 (finalized root)", 169, 41},
 	}
 
 	for _, tt := range tests {
@@ -145,23 +141,12 @@ func TestForkSpecGindexValues(t *testing.T) {
 		checks map[string]uint32
 	}{
 		{
-			name: "Deneb gindex values",
-			fork: "deneb",
-			checks: map[string]uint32{
-				"FinalizedRoot":        105,
-				"CurrentSyncCommittee": 54,
-				"NextSyncCommittee":    55,
-				"ExecutionPayload":     25,
-			},
-		},
-		{
-			name: "Electra gindex values",
+			name: "Electra/Fulu gindex values",
 			fork: "electra",
 			checks: map[string]uint32{
-				"FinalizedRoot":        169,
-				"CurrentSyncCommittee": 86,
-				"NextSyncCommittee":    87,
-				"ExecutionPayload":     25,
+				"FinalizedRoot":     169,
+				"NextSyncCommittee": 87,
+				"ExecutionPayload":  25,
 			},
 		},
 	}

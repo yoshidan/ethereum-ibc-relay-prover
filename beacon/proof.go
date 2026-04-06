@@ -6,15 +6,10 @@ import (
 	"sort"
 )
 
-// Gindex constants for different forks
+// Gindex constants for Electra/Fulu (and future forks)
 const (
-	// Deneb gindices
-	FinalizedRootGindexDeneb        = 105
-	NextSyncCommitteeGindexDeneb    = 55
-
-	// Electra/Fulu gindices (post-Electra)
-	FinalizedRootGindexElectra      = 169
-	NextSyncCommitteeGindexElectra  = 87
+	FinalizedRootGindex      = 169
+	NextSyncCommitteeGindex  = 87
 
 	// Lodestar proof API gindices
 	// The Lodestar /eth/v0/beacon/proof/block API uses a virtual tree structure where:
@@ -219,24 +214,14 @@ func ExtractSingleProofBranch(leaves [][]byte, gindex uint64) ([][]byte, error) 
 	return branch, nil
 }
 
-// GetFinalizedRootGindex returns the finalized root gindex for the given version
-func GetFinalizedRootGindex(version string) uint64 {
-	switch version {
-	case "deneb":
-		return FinalizedRootGindexDeneb
-	default: // electra, fulu, and future forks use the Electra gindex
-		return FinalizedRootGindexElectra
-	}
+// GetFinalizedRootGindex returns the finalized root gindex
+func GetFinalizedRootGindex(_ string) uint64 {
+	return FinalizedRootGindex
 }
 
-// GetNextSyncCommitteeGindex returns the next sync committee gindex for the given version
-func GetNextSyncCommitteeGindex(version string) uint64 {
-	switch version {
-	case "deneb":
-		return NextSyncCommitteeGindexDeneb
-	default:
-		return NextSyncCommitteeGindexElectra
-	}
+// GetNextSyncCommitteeGindex returns the next sync committee gindex
+func GetNextSyncCommitteeGindex(_ string) uint64 {
+	return NextSyncCommitteeGindex
 }
 
 // ExtractExecutionBranchForBodyRoot extracts the execution branch for verification against body_root
