@@ -7,7 +7,6 @@ import (
 
 	"github.com/datachainlab/ethereum-ibc-relay-prover/beacon"
 	"github.com/OffchainLabs/prysm/v7/encoding/ssz"
-	enginev1 "github.com/OffchainLabs/prysm/v7/proto/engine/v1"
 	fastssz "github.com/prysmaticlabs/fastssz"
 )
 
@@ -176,32 +175,3 @@ func transactionRoot(tx []byte) ([32]byte, error) {
 	return ssz.MixInLength(bytesRoot, lengthBuf), nil
 }
 
-// computeWithdrawalsRoot computes the SSZ root of withdrawals list
-func computeWithdrawalsRoot(withdrawals []*enginev1.Withdrawal) ([32]byte, error) {
-	// Hash each withdrawal
-	wRoots := make([][32]byte, len(withdrawals))
-	for i, w := range withdrawals {
-		hh := fastssz.NewHasher()
-		hh.PutUint64(w.Index)
-		hh.PutUint64(uint64(w.ValidatorIndex))
-		hh.PutBytes(w.Address)
-		hh.PutUint64(w.Amount)
-		root, err := hh.HashRoot()
-		if err != nil {
-			return [32]byte{}, fmt.Errorf("failed to compute withdrawal root %d: %w", i, err)
-		}
-		wRoots[i] = root
-	}
-
-	// Create Merkle tree from withdrawal roots
-	const MAX_WITHDRAWALS_PER_PAYLOAD = 16
-	root, err := ssz.BitwiseMerkleize(wRoots, uint64(len(wRoots)), MAX_WITHDRAWALS_PER_PAYLOAD)
-	if err != nil {
-		return [32]byte{}, err
-	}
-
-	// Mix in length
-	lengthBuf := make([]byte, 32)
-	binary.LittleEndian.PutUint64(lengthBuf, uint64(len(withdrawals)))
-	return ssz.MixInLength(root, lengthBuf), nil
-}
