@@ -791,3 +791,49 @@ func TestGetBootstrapInPeriod(t *testing.T) {
 		t.Error("Sync committee should have aggregate pubkey")
 	}
 }
+
+// TestGetSyncCommitteesInPeriod_HistoricalPeriod tests retrieving sync committees for a period
+// older than the finalized period. This simulates the case where the prover has been offline
+// for an extended time and needs to catch up from an old state.
+func TestGetSyncCommitteesInPeriod_HistoricalPeriod(t *testing.T) {
+	pr := newTestProver(t)
+	ctx := context.Background()
+
+	// Get finalized block to determine current period
+	block, err := pr.beaconClient.GetBeaconBlock(ctx, "finalized")
+	if err != nil {
+		t.Fatalf("Beacon API not available: %v", err)
+	}
+
+	slot := uint64(block.Data.Message.Slot)
+	epoch := pr.computeEpoch(slot)
+	finalizedPeriod := pr.computeSyncCommitteePeriod(epoch)
+
+	t.Logf("Finalized: slot=%d, epoch=%d, period=%d", slot, epoch, finalizedPeriod)
+
+	// Skip if we're still in period 0 (chain too young)
+	if finalizedPeriod == 0 {
+		t.Skip("Chain is too young (period 0), cannot test historical period access")
+	}
+
+	// Test accessing a historical period (period < finalizedPeriod)
+	historicalPeriod := finalizedPeriod - 1
+	t.Logf("Testing historical period access: historicalPeriod=%d, finalizedPeriod=%d", historicalPeriod, finalizedPeriod)
+
+	currentSC, nextSC, err := pr.getSyncCommitteesInPeriod(ctx, historicalPeriod)
+	if err != nil {
+		t.Fatalf("getSyncCommitteesInPeriod failed for historical period %d: %v", historicalPeriod, err)
+	}
+
+	if currentSC == nil {
+		t.Error("Current sync committee should not be nil")
+	} else {
+		t.Logf("Historical current sync committee pubkeys count: %d", len(currentSC.Pubkeys))
+	}
+
+	if nextSC == nil {
+		t.Error("Next sync committee should not be nil")
+	} else {
+		t.Logf("Historical next sync committee pubkeys count: %d", len(nextSC.Pubkeys))
+	}
+}
