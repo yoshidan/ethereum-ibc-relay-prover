@@ -469,6 +469,13 @@ func (pr *Prover) findSignatureAndAttestedSlot(ctx context.Context, finalizedBlo
 	slotsPerEpoch := pr.slotsPerEpoch()
 	maxSearchSlots := slotsPerEpoch * 2 // Search up to 2 epochs
 
+	// Log search parameters for debugging
+	pr.GetLogger().DebugContext(ctx, "searching for signature and attested slots",
+		"finalized_slot", finalizedSlot,
+		"finalized_block_root", fmt.Sprintf("0x%x", finalizedBlockRoot),
+		"slots_per_epoch", slotsPerEpoch,
+		"max_search_slots", maxSearchSlots)
+
 	var attestedBlockRootHex string
 
 	for offset := uint64(1); offset <= maxSearchSlots; offset++ {
@@ -515,28 +522,65 @@ func (pr *Prover) findSignatureAndAttestedSlot(ctx context.Context, finalizedBlo
 
 	// Now find the signature block (the child of attested block)
 	// The signature block's parent_root must equal the attested block's root
-	for offset := uint64(1); offset <= slotsPerEpoch; offset++ {
-		candidateSlot := attestedSlot + offset
+	// Wait for the chain to advance if necessary
+	requiredSlot := attestedSlot + slotsPerEpoch
+	maxWaitAttempts := 30 // Max ~3 minutes with 6 second intervals
 
-		block, err := pr.beaconClient.GetBeaconBlock(ctx, fmt.Sprintf("%d", candidateSlot))
+	for attempt := 0; attempt < maxWaitAttempts; attempt++ {
+		// Check current head slot
+		headBlock, err := pr.beaconClient.GetBeaconBlock(ctx, "head")
 		if err != nil {
-			// No block at this slot, continue
-			continue
+			return 0, 0, fmt.Errorf("failed to get head block: %w", err)
+		}
+		headSlot := uint64(headBlock.Data.Message.Slot)
+
+		pr.GetLogger().DebugContext(ctx, "checking chain progress",
+			"head_slot", headSlot,
+			"attested_slot", attestedSlot,
+			"required_slot", requiredSlot,
+			"attempt", attempt)
+
+		// Search for signature block in available slots
+		for offset := uint64(1); offset <= slotsPerEpoch; offset++ {
+			candidateSlot := attestedSlot + offset
+
+			// Don't search beyond head slot
+			if candidateSlot > headSlot {
+				break
+			}
+
+			block, err := pr.beaconClient.GetBeaconBlock(ctx, fmt.Sprintf("%d", candidateSlot))
+			if err != nil {
+				// No block at this slot, continue
+				continue
+			}
+
+			// Check if this block's parent is the attested block
+			parentRootHex := block.Data.Message.ParentRoot.String()
+			if parentRootHex == attestedBlockRootHex {
+				signatureSlot = candidateSlot
+				pr.GetLogger().DebugContext(ctx, "found signature block",
+					"signature_slot", signatureSlot,
+					"attested_slot", attestedSlot,
+					"parent_root", parentRootHex)
+				return signatureSlot, attestedSlot, nil
+			}
 		}
 
-		// Check if this block's parent is the attested block
-		parentRootHex := block.Data.Message.ParentRoot.String()
-		if parentRootHex == attestedBlockRootHex {
-			signatureSlot = candidateSlot
-			pr.GetLogger().DebugContext(ctx, "found signature block",
-				"signature_slot", signatureSlot,
-				"attested_slot", attestedSlot,
-				"parent_root", parentRootHex)
-			return signatureSlot, attestedSlot, nil
+		// If head slot is beyond our search range and we still haven't found the signature block,
+		// it means the attested block is not on the canonical chain (shouldn't happen normally)
+		if headSlot >= requiredSlot {
+			return 0, 0, fmt.Errorf("signature block not found within %d slots after attested slot %d (head: %d, expected parent: %s)", slotsPerEpoch, attestedSlot, headSlot, attestedBlockRootHex)
 		}
+
+		// Wait for more blocks to be produced
+		pr.GetLogger().DebugContext(ctx, "waiting for chain to advance",
+			"head_slot", headSlot,
+			"required_slot", requiredSlot)
+		time.Sleep(time.Duration(pr.secondsPerSlot()) * time.Second)
 	}
 
-	return 0, 0, fmt.Errorf("signature block not found within %d slots after attested slot %d", slotsPerEpoch, attestedSlot)
+	return 0, 0, fmt.Errorf("timeout waiting for signature block after attested slot %d", attestedSlot)
 }
 
 // bytesEqual compares two byte slices for equality
