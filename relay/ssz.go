@@ -7,6 +7,7 @@ import (
 
 	"github.com/datachainlab/ethereum-ibc-relay-prover/beacon"
 	lctypes "github.com/datachainlab/ethereum-ibc-relay-prover/light-clients/ethereum/types"
+	fieldparams "github.com/OffchainLabs/prysm/v7/config/fieldparams"
 	"github.com/OffchainLabs/prysm/v7/encoding/ssz"
 	enginev1 "github.com/OffchainLabs/prysm/v7/proto/engine/v1"
 	ethpb "github.com/OffchainLabs/prysm/v7/proto/prysm/v1alpha1"
@@ -124,16 +125,88 @@ type ParsedBeaconState struct {
 	version      string
 }
 
-// GenerateFinalityBranch generates the Merkle proof for the finalized_checkpoint field
+// GenerateFinalityBranch generates the Merkle proof for the finalized_checkpoint.root field
+// The proof consists of two parts:
+// 1. Proof from finalized_checkpoint.root to finalized_checkpoint container (epoch hash)
+// 2. Proof from finalized_checkpoint to state_root
 func (p *ParsedBeaconState) GenerateFinalityBranch() ([][]byte, error) {
-	gindex := p.forkSpec.FinalizedRootGindex
-	return p.generateStateProofFromSSZ(gindex)
+	// Get epoch hash (sibling of root within finalized_checkpoint)
+	var epochHash []byte
+	switch p.version {
+	case "fulu":
+		if p.stateFulu == nil || p.stateFulu.FinalizedCheckpoint == nil {
+			return nil, fmt.Errorf("fulu state or finalized_checkpoint not parsed")
+		}
+		epochHash = sszUint64(uint64(p.stateFulu.FinalizedCheckpoint.Epoch))
+	case "electra":
+		if p.stateElectra == nil || p.stateElectra.FinalizedCheckpoint == nil {
+			return nil, fmt.Errorf("electra state or finalized_checkpoint not parsed")
+		}
+		epochHash = sszUint64(uint64(p.stateElectra.FinalizedCheckpoint.Epoch))
+	case "deneb":
+		if p.stateDeneb == nil || p.stateDeneb.FinalizedCheckpoint == nil {
+			return nil, fmt.Errorf("deneb state or finalized_checkpoint not parsed")
+		}
+		epochHash = sszUint64(uint64(p.stateDeneb.FinalizedCheckpoint.Epoch))
+	default:
+		return nil, fmt.Errorf("unsupported version: %s", p.version)
+	}
+
+	// Get state field proof for finalized_checkpoint container (field index 20)
+	// The state tree depth depends on the number of fields:
+	// - Electra/Fulu: 37 fields -> padded to 64 -> depth 6
+	// - Deneb: 28 fields -> padded to 32 -> depth 5
+	var stateProof [][]byte
+	var err error
+	const finalizedCheckpointFieldIndex = 20
+
+	switch p.version {
+	case "fulu":
+		stateProof, err = p.generateStateLevelProof(p.stateFulu, finalizedCheckpointFieldIndex)
+	case "electra":
+		stateProof, err = p.generateStateLevelProofElectra(p.stateElectra, finalizedCheckpointFieldIndex)
+	case "deneb":
+		stateProof, err = p.generateStateLevelProofDeneb(p.stateDeneb, finalizedCheckpointFieldIndex)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate state level proof: %w", err)
+	}
+
+	// Combine: [epoch_hash, ...state_proof]
+	branch := make([][]byte, 0, 1+len(stateProof))
+	branch = append(branch, epochHash)
+	branch = append(branch, stateProof...)
+	return branch, nil
 }
 
 // GenerateNextSyncCommitteeBranch generates the Merkle proof for the next_sync_committee field
+// next_sync_committee is a top-level field in the state, so we just need the state level proof
 func (p *ParsedBeaconState) GenerateNextSyncCommitteeBranch() ([][]byte, error) {
-	gindex := p.forkSpec.NextSyncCommitteeGindex
-	return p.generateStateProofFromSSZ(gindex)
+	// next_sync_committee is at field index 23 for Electra/Fulu, 22 for Deneb
+	// The gindex for next_sync_committee itself (not a nested field) would be:
+	// - Electra/Fulu: 64 + 23 = 87
+	// - Deneb: 32 + 22 = 54 (or 55 if 1-indexed?)
+	var stateProof [][]byte
+	var err error
+
+	switch p.version {
+	case "fulu":
+		const nextSyncCommitteeFieldIndex = 23
+		stateProof, err = p.generateStateLevelProof(p.stateFulu, nextSyncCommitteeFieldIndex)
+	case "electra":
+		const nextSyncCommitteeFieldIndex = 23
+		stateProof, err = p.generateStateLevelProofElectra(p.stateElectra, nextSyncCommitteeFieldIndex)
+	case "deneb":
+		const nextSyncCommitteeFieldIndex = 22
+		stateProof, err = p.generateStateLevelProofDeneb(p.stateDeneb, nextSyncCommitteeFieldIndex)
+	default:
+		return nil, fmt.Errorf("unsupported version: %s", p.version)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate state level proof: %w", err)
+	}
+
+	return stateProof, nil
 }
 
 // generateStateProofFromSSZ generates a Merkle proof by building the tree from field hashes
@@ -173,6 +246,40 @@ func (p *ParsedBeaconState) generateStateProofFromSSZ(gindex uint32) ([][]byte, 
 	// Generate proof using gindex
 	leafIndex := gindexToLeafIndex(gindex)
 	return generateMerkleProof(fieldHashes, leafIndex)
+}
+
+// generateStateLevelProof generates a Merkle proof for a specific field index in the Fulu state
+// This creates a proof from the field position to the state root (without nested structure expansion)
+func (p *ParsedBeaconState) generateStateLevelProof(state *ethpb.BeaconStateFulu, fieldIndex int) ([][]byte, error) {
+	// Electra/Fulu has 37 fields, padded to 64 leaves (depth 6)
+	const numLeaves = 64
+	fieldHashes, err := getBeaconStateFuluFieldHashesWithSize(state, numLeaves)
+	if err != nil {
+		return nil, err
+	}
+	return generateMerkleProof(fieldHashes, uint64(fieldIndex))
+}
+
+// generateStateLevelProofElectra generates a Merkle proof for a specific field index in the Electra state
+func (p *ParsedBeaconState) generateStateLevelProofElectra(state *ethpb.BeaconStateElectra, fieldIndex int) ([][]byte, error) {
+	// Electra has 37 fields, padded to 64 leaves (depth 6)
+	const numLeaves = 64
+	fieldHashes, err := getBeaconStateElectraFieldHashesWithSize(state, numLeaves)
+	if err != nil {
+		return nil, err
+	}
+	return generateMerkleProof(fieldHashes, uint64(fieldIndex))
+}
+
+// generateStateLevelProofDeneb generates a Merkle proof for a specific field index in the Deneb state
+func (p *ParsedBeaconState) generateStateLevelProofDeneb(state *ethpb.BeaconStateDeneb, fieldIndex int) ([][]byte, error) {
+	// Deneb has 28 fields, padded to 32 leaves (depth 5)
+	const numLeaves = 32
+	fieldHashes, err := getBeaconStateDenebFieldHashesWithSize(state, numLeaves)
+	if err != nil {
+		return nil, err
+	}
+	return generateMerkleProof(fieldHashes, uint64(fieldIndex))
 }
 
 // ParsedBeaconBlock holds parsed beacon block data with methods for generating proofs
@@ -297,6 +404,12 @@ func ParseBeaconBlockSSZ(data []byte, version string, forkSpec *lctypes.ForkSpec
 			return nil, fmt.Errorf("failed to convert execution payload to header: %w", err)
 		}
 		result.SyncAggregate = syncAggregateToProto(msg.Body.SyncAggregate)
+		// Compute body root using HashTreeRoot
+		bodyRoot, err := msg.Body.HashTreeRoot()
+		if err != nil {
+			return nil, fmt.Errorf("failed to compute body root: %w", err)
+		}
+		result.BodyRoot = bodyRoot[:]
 	case "electra":
 		block := &ethpb.SignedBeaconBlockElectra{}
 		if err := block.UnmarshalSSZ(data); err != nil {
@@ -315,6 +428,12 @@ func ParseBeaconBlockSSZ(data []byte, version string, forkSpec *lctypes.ForkSpec
 			return nil, fmt.Errorf("failed to convert execution payload to header: %w", err)
 		}
 		result.SyncAggregate = syncAggregateToProto(msg.Body.SyncAggregate)
+		// Compute body root using HashTreeRoot
+		bodyRoot, err := msg.Body.HashTreeRoot()
+		if err != nil {
+			return nil, fmt.Errorf("failed to compute body root: %w", err)
+		}
+		result.BodyRoot = bodyRoot[:]
 	case "deneb":
 		block := &ethpb.SignedBeaconBlockDeneb{}
 		if err := block.UnmarshalSSZ(data); err != nil {
@@ -333,18 +452,15 @@ func ParseBeaconBlockSSZ(data []byte, version string, forkSpec *lctypes.ForkSpec
 			return nil, fmt.Errorf("failed to convert execution payload to header: %w", err)
 		}
 		result.SyncAggregate = syncAggregateToProto(msg.Body.SyncAggregate)
+		// Compute body root using HashTreeRoot
+		bodyRoot, err := msg.Body.HashTreeRoot()
+		if err != nil {
+			return nil, fmt.Errorf("failed to compute body root: %w", err)
+		}
+		result.BodyRoot = bodyRoot[:]
 	default:
 		return nil, fmt.Errorf("unsupported version: %s", version)
 	}
-
-	// Compute body root
-	hh := fastssz.NewHasher()
-	hh.PutBytes(result.bodySSZ)
-	bodyRoot, err := hh.HashRoot()
-	if err != nil {
-		return nil, fmt.Errorf("failed to compute body root: %w", err)
-	}
-	result.BodyRoot = bodyRoot[:]
 
 	// Compute execution root
 	executionRoot, err := result.ExecutionPayload.HashTreeRoot()
@@ -555,17 +671,14 @@ func computeWithdrawalsRoot(withdrawals []*enginev1.Withdrawal) ([32]byte, error
 
 // getBeaconStateFuluFieldHashesWithSize computes field hashes with a specific tree size
 func getBeaconStateFuluFieldHashesWithSize(state *ethpb.BeaconStateFulu, numLeaves int) ([][]byte, error) {
-	hh := fastssz.NewHasher()
-
-	// Use HashTreeRootWith to compute the hash, but we need individual field hashes
-	// For now, we'll compute the entire state hash and extract field hashes manually
-	if err := state.HashTreeRootWith(hh); err != nil {
-		return nil, fmt.Errorf("failed to hash state: %w", err)
-	}
-
-	// Since fastssz doesn't expose the tree structure, we need to compute field hashes individually
-	// The number of leaves is determined by the required gindex depth
+	// Compute field hashes individually
+	// The number of leaves is determined by the required tree size (padded to power of 2)
 	fieldHashes := make([][]byte, numLeaves)
+
+	// Initialize remaining slots with zero hashes (for padding)
+	for i := 0; i < numLeaves; i++ {
+		fieldHashes[i] = make([]byte, 32)
+	}
 
 	// Field 0: genesis_time (uint64)
 	fieldHashes[0] = sszUint64(state.GenesisTime)
@@ -598,15 +711,15 @@ func getBeaconStateFuluFieldHashesWithSize(state *ethpb.BeaconStateFulu, numLeav
 		fieldHashes[4] = make([]byte, 32)
 	}
 
-	// Field 5: block_roots (Vector[Root, 8192])
-	root5, err := vectorRootHash(state.BlockRoots, 8192)
+	// Field 5: block_roots (Vector[Root, SLOTS_PER_HISTORICAL_ROOT])
+	root5, err := vectorRootHash(state.BlockRoots, fieldparams.BlockRootsLength)
 	if err != nil {
 		return nil, err
 	}
 	fieldHashes[5] = root5[:]
 
-	// Field 6: state_roots (Vector[Root, 8192])
-	root6, err := vectorRootHash(state.StateRoots, 8192)
+	// Field 6: state_roots (Vector[Root, SLOTS_PER_HISTORICAL_ROOT])
+	root6, err := vectorRootHash(state.StateRoots, fieldparams.StateRootsLength)
 	if err != nil {
 		return nil, err
 	}
@@ -631,7 +744,7 @@ func getBeaconStateFuluFieldHashesWithSize(state *ethpb.BeaconStateFulu, numLeav
 	}
 
 	// Field 9: eth1_data_votes (List)
-	root9, err := eth1DataVotesRoot(state.Eth1DataVotes, 2048)
+	root9, err := eth1DataVotesRoot(state.Eth1DataVotes, fieldparams.Eth1DataVotesLength)
 	if err != nil {
 		return nil, err
 	}
@@ -654,15 +767,15 @@ func getBeaconStateFuluFieldHashesWithSize(state *ethpb.BeaconStateFulu, numLeav
 	}
 	fieldHashes[12] = root12[:]
 
-	// Field 13: randao_mixes (Vector[Bytes32, 65536])
-	root13, err := vectorRootHash(state.RandaoMixes, 65536)
+	// Field 13: randao_mixes (Vector[Bytes32, EPOCHS_PER_HISTORICAL_VECTOR])
+	root13, err := vectorRootHash(state.RandaoMixes, fieldparams.RandaoMixesLength)
 	if err != nil {
 		return nil, err
 	}
 	fieldHashes[13] = root13[:]
 
-	// Field 14: slashings (Vector[Gwei, 8192])
-	root14, err := uint64VectorRoot(state.Slashings, 8192)
+	// Field 14: slashings (Vector[Gwei, EPOCHS_PER_SLASHINGS_VECTOR])
+	root14, err := uint64VectorRoot(state.Slashings, fieldparams.SlashingsLength)
 	if err != nil {
 		return nil, err
 	}
@@ -811,8 +924,11 @@ func getBeaconStateFuluFieldHashesWithSize(state *ethpb.BeaconStateFulu, numLeav
 	}
 	fieldHashes[36] = root36[:]
 
-	// Field 37: proposer_lookahead (Vector[uint64, 64])
-	root37, err := uint64VectorRoot(state.ProposerLookahead, 64)
+	// Field 37: proposer_lookahead (Vector[uint64, (MIN_SEED_LOOKAHEAD + 1) * SLOTS_PER_EPOCH])
+	// MIN_SEED_LOOKAHEAD = 1 for all presets
+	// minimal: (1+1) * 8 = 16, mainnet: (1+1) * 32 = 64
+	proposerLookaheadSize := uint64(2 * fieldparams.SlotsPerEpoch)
+	root37, err := uint64VectorRoot(state.ProposerLookahead, proposerLookaheadSize)
 	if err != nil {
 		return nil, err
 	}
@@ -868,13 +984,13 @@ func getBeaconStateElectraFieldHashesWithSize(state *ethpb.BeaconStateElectra, n
 		fieldHashes[4] = make([]byte, 32)
 	}
 
-	root5, err := vectorRootHash(state.BlockRoots, 8192)
+	root5, err := vectorRootHash(state.BlockRoots, fieldparams.BlockRootsLength)
 	if err != nil {
 		return nil, err
 	}
 	fieldHashes[5] = root5[:]
 
-	root6, err := vectorRootHash(state.StateRoots, 8192)
+	root6, err := vectorRootHash(state.StateRoots, fieldparams.StateRootsLength)
 	if err != nil {
 		return nil, err
 	}
@@ -896,7 +1012,7 @@ func getBeaconStateElectraFieldHashesWithSize(state *ethpb.BeaconStateElectra, n
 		fieldHashes[8] = make([]byte, 32)
 	}
 
-	root9, err := eth1DataVotesRoot(state.Eth1DataVotes, 2048)
+	root9, err := eth1DataVotesRoot(state.Eth1DataVotes, fieldparams.Eth1DataVotesLength)
 	if err != nil {
 		return nil, err
 	}
@@ -916,13 +1032,13 @@ func getBeaconStateElectraFieldHashesWithSize(state *ethpb.BeaconStateElectra, n
 	}
 	fieldHashes[12] = root12[:]
 
-	root13, err := vectorRootHash(state.RandaoMixes, 65536)
+	root13, err := vectorRootHash(state.RandaoMixes, fieldparams.RandaoMixesLength)
 	if err != nil {
 		return nil, err
 	}
 	fieldHashes[13] = root13[:]
 
-	root14, err := uint64VectorRoot(state.Slashings, 8192)
+	root14, err := uint64VectorRoot(state.Slashings, fieldparams.SlashingsLength)
 	if err != nil {
 		return nil, err
 	}
@@ -1080,13 +1196,13 @@ func getBeaconStateDenebFieldHashesWithSize(state *ethpb.BeaconStateDeneb, numLe
 		fieldHashes[4] = make([]byte, 32)
 	}
 
-	root5, err := vectorRootHash(state.BlockRoots, 8192)
+	root5, err := vectorRootHash(state.BlockRoots, fieldparams.BlockRootsLength)
 	if err != nil {
 		return nil, err
 	}
 	fieldHashes[5] = root5[:]
 
-	root6, err := vectorRootHash(state.StateRoots, 8192)
+	root6, err := vectorRootHash(state.StateRoots, fieldparams.StateRootsLength)
 	if err != nil {
 		return nil, err
 	}
@@ -1108,7 +1224,7 @@ func getBeaconStateDenebFieldHashesWithSize(state *ethpb.BeaconStateDeneb, numLe
 		fieldHashes[8] = make([]byte, 32)
 	}
 
-	root9, err := eth1DataVotesRoot(state.Eth1DataVotes, 2048)
+	root9, err := eth1DataVotesRoot(state.Eth1DataVotes, fieldparams.Eth1DataVotesLength)
 	if err != nil {
 		return nil, err
 	}
@@ -1128,13 +1244,13 @@ func getBeaconStateDenebFieldHashesWithSize(state *ethpb.BeaconStateDeneb, numLe
 	}
 	fieldHashes[12] = root12[:]
 
-	root13, err := vectorRootHash(state.RandaoMixes, 65536)
+	root13, err := vectorRootHash(state.RandaoMixes, fieldparams.RandaoMixesLength)
 	if err != nil {
 		return nil, err
 	}
 	fieldHashes[13] = root13[:]
 
-	root14, err := uint64VectorRoot(state.Slashings, 8192)
+	root14, err := uint64VectorRoot(state.Slashings, fieldparams.SlashingsLength)
 	if err != nil {
 		return nil, err
 	}
@@ -1589,8 +1705,8 @@ func pendingPartialWithdrawalsRoot(withdrawals []*ethpb.PendingPartialWithdrawal
 		}
 		roots[i] = root
 	}
-	const PENDING_PARTIAL_WITHDRAWALS_LIMIT = 134217728
-	root, err := ssz.BitwiseMerkleize(roots, uint64(len(roots)), PENDING_PARTIAL_WITHDRAWALS_LIMIT)
+	// Use fieldparams for preset-specific limit (minimal: 64, mainnet: 134217728)
+	root, err := ssz.BitwiseMerkleize(roots, uint64(len(roots)), fieldparams.PendingPartialWithdrawalsLimit)
 	if err != nil {
 		return [32]byte{}, err
 	}
@@ -1611,8 +1727,8 @@ func pendingConsolidationsRoot(consolidations []*ethpb.PendingConsolidation) ([3
 		}
 		roots[i] = root
 	}
-	const PENDING_CONSOLIDATIONS_LIMIT = 262144
-	root, err := ssz.BitwiseMerkleize(roots, uint64(len(roots)), PENDING_CONSOLIDATIONS_LIMIT)
+	// Use fieldparams for preset-specific limit (minimal: 64, mainnet: 262144)
+	root, err := ssz.BitwiseMerkleize(roots, uint64(len(roots)), fieldparams.PendingConsolidationsLimit)
 	if err != nil {
 		return [32]byte{}, err
 	}

@@ -1,19 +1,16 @@
 package relay
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"testing"
 )
 
 func newTestProverForSSZ(t *testing.T) *Prover {
-	initTestLogger()
-
-	// Create a devnet config for testing (mainnet preset with all forks at epoch 0)
-	config := ProverConfig{}
-	return &Prover{
-		chain:  &mockChain{},
-		config: config,
-	}
+	// Use the same helper as prover_test.go
+	return newTestProver(t)
 }
 
 func TestGindexToDepth(t *testing.T) {
@@ -400,4 +397,263 @@ func TestForkSpecGindexValues(t *testing.T) {
 			}
 		})
 	}
+}
+
+// isValidMerkleBranch verifies a merkle branch proof (same logic as ethereum-light-client-rs)
+// leaf: the hash of the value being proven
+// branch: the merkle proof (sibling hashes from leaf to root)
+// gindex: generalized index of the leaf
+// root: the expected root hash
+func isValidMerkleBranch(leaf []byte, branch [][]byte, gindex uint32, root []byte) error {
+	if gindex == 0 {
+		return fmt.Errorf("invalid gindex: 0")
+	}
+	depth := gindexToDepth(gindex)
+	subtreeIndex := gindex % (1 << depth)
+
+	if len(branch) != depth {
+		return fmt.Errorf("invalid branch length: got %d, expected %d", len(branch), depth)
+	}
+
+	value := make([]byte, 32)
+	copy(value, leaf)
+
+	for i := 0; i < depth; i++ {
+		var combined []byte
+		if (subtreeIndex>>i)%2 == 1 {
+			// subtree_index / 2^i % 2 == 1: hash(branch[i] || value)
+			combined = append(branch[i], value...)
+		} else {
+			// subtree_index / 2^i % 2 == 0: hash(value || branch[i])
+			combined = append(value, branch[i]...)
+		}
+		h := sha256.Sum256(combined)
+		value = h[:]
+	}
+
+	if !bytes.Equal(value, root) {
+		return fmt.Errorf("merkle branch verification failed: computed root %x != expected root %x", value, root)
+	}
+	return nil
+}
+
+// TestVerifyExecutionBranchLikeELC tests execution branch verification using the same logic as ELC
+func TestVerifyExecutionBranchLikeELC(t *testing.T) {
+	pr := newTestProver(t)
+	ctx := context.Background()
+
+	// Get finalized block
+	block, err := pr.beaconClient.GetBeaconBlock(ctx, "finalized")
+	if err != nil {
+		t.Skipf("Beacon API not available: %v", err)
+	}
+
+	slot := uint64(block.Data.Message.Slot)
+	forkSpec := pr.getForkSpecForSlot(slot)
+	if forkSpec == nil {
+		t.Fatalf("getForkSpecForSlot returned nil for slot %d", slot)
+	}
+
+	// Get block SSZ
+	blockSSZ, err := pr.beaconClient.GetBeaconBlockSSZ(ctx, "finalized")
+	if err != nil {
+		t.Fatalf("Failed to get block SSZ: %v", err)
+	}
+
+	// Parse block
+	parsedBlock, err := ParseBeaconBlockSSZ(blockSSZ, block.Version, forkSpec)
+	if err != nil {
+		t.Fatalf("Failed to parse block SSZ: %v", err)
+	}
+
+	// Generate execution branch
+	executionBranch, err := parsedBlock.GenerateExecutionPayloadBranch()
+	if err != nil {
+		t.Fatalf("GenerateExecutionPayloadBranch failed: %v", err)
+	}
+
+	t.Logf("Execution branch length: %d", len(executionBranch))
+	t.Logf("Execution root: %x", parsedBlock.ExecutionRoot)
+	t.Logf("Body root: %x", parsedBlock.BodyRoot)
+	t.Logf("Gindex: %d", forkSpec.ExecutionPayloadGindex)
+
+	// Verify using ELC logic
+	// leaf = hash_tree_root(execution_payload)
+	// root = body_root (execution_payload is in the block body)
+	err = isValidMerkleBranch(
+		parsedBlock.ExecutionRoot,        // leaf
+		executionBranch,                  // branch
+		forkSpec.ExecutionPayloadGindex,  // gindex: 25
+		parsedBlock.BodyRoot,             // root: body_root
+	)
+	if err != nil {
+		t.Fatalf("Execution branch verification failed (ELC-style): %v", err)
+	}
+
+	t.Log("Execution branch verification passed!")
+}
+
+// TestVerifyFinalityBranchLikeELC tests finality branch verification using the same logic as ELC
+func TestVerifyFinalityBranchLikeELC(t *testing.T) {
+	pr := newTestProver(t)
+	ctx := context.Background()
+
+	// Get head block (recent, should be in memory)
+	block, err := pr.beaconClient.GetBeaconBlock(ctx, "head")
+	if err != nil {
+		t.Skipf("Beacon API not available: %v", err)
+	}
+
+	slot := uint64(block.Data.Message.Slot)
+	version := block.Version
+	forkSpec := pr.getForkSpecForSlot(slot)
+	if forkSpec == nil {
+		t.Fatalf("getForkSpecForSlot returned nil for slot %d", slot)
+	}
+
+	// Get block SSZ and parse
+	blockSSZ, err := pr.beaconClient.GetBeaconBlockSSZ(ctx, fmt.Sprintf("%d", slot))
+	if err != nil {
+		t.Fatalf("Failed to get block SSZ: %v", err)
+	}
+
+	parsedBlock, err := ParseBeaconBlockSSZ(blockSSZ, version, forkSpec)
+	if err != nil {
+		t.Fatalf("Failed to parse block SSZ: %v", err)
+	}
+
+	// Get state SSZ
+	stateSSZ, err := pr.beaconClient.GetBeaconStateSSZ(ctx, fmt.Sprintf("%d", slot))
+	if err != nil {
+		t.Fatalf("Failed to get state SSZ: %v", err)
+	}
+
+	parsedState, err := ParseBeaconStateSSZ(stateSSZ, version, forkSpec)
+	if err != nil {
+		t.Fatalf("Failed to parse state SSZ: %v", err)
+	}
+
+	// Get finalized checkpoint root from parsed state
+	// Note: We trust the state root from block header (parsedBlock.StateRoot) instead of computing it
+	// because state root computation is not needed for actual relay/prover processing
+	var finalizedCheckpointRoot []byte
+	switch version {
+	case "fulu":
+		finalizedCheckpointRoot = parsedState.stateFulu.FinalizedCheckpoint.Root
+	case "electra":
+		finalizedCheckpointRoot = parsedState.stateElectra.FinalizedCheckpoint.Root
+	case "deneb":
+		finalizedCheckpointRoot = parsedState.stateDeneb.FinalizedCheckpoint.Root
+	}
+
+	// Generate finality branch
+	finalityBranch, err := parsedState.GenerateFinalityBranch()
+	if err != nil {
+		t.Fatalf("GenerateFinalityBranch failed: %v", err)
+	}
+
+	t.Logf("Finality branch length: %d", len(finalityBranch))
+	t.Logf("Finalized checkpoint root: %x", finalizedCheckpointRoot)
+	t.Logf("State root: %x", parsedBlock.StateRoot)
+	t.Logf("Gindex: %d", forkSpec.FinalizedRootGindex)
+
+	// Verify using ELC logic
+	err = isValidMerkleBranch(
+		finalizedCheckpointRoot,          // leaf: finalized_checkpoint.root
+		finalityBranch,                   // branch
+		forkSpec.FinalizedRootGindex,     // gindex: 169 (electra) or 105 (deneb)
+		parsedBlock.StateRoot,            // root: state root
+	)
+	if err != nil {
+		t.Fatalf("Finality branch verification failed (ELC-style): %v", err)
+	}
+
+	t.Log("Finality branch verification passed!")
+}
+
+// TestVerifyNextSyncCommitteeBranchLikeELC tests next sync committee branch verification
+func TestVerifyNextSyncCommitteeBranchLikeELC(t *testing.T) {
+	pr := newTestProver(t)
+	ctx := context.Background()
+
+	// Get head block
+	block, err := pr.beaconClient.GetBeaconBlock(ctx, "head")
+	if err != nil {
+		t.Skipf("Beacon API not available: %v", err)
+	}
+
+	slot := uint64(block.Data.Message.Slot)
+	version := block.Version
+	forkSpec := pr.getForkSpecForSlot(slot)
+	if forkSpec == nil {
+		t.Fatalf("getForkSpecForSlot returned nil for slot %d", slot)
+	}
+
+	// Get block SSZ and parse
+	blockSSZ, err := pr.beaconClient.GetBeaconBlockSSZ(ctx, fmt.Sprintf("%d", slot))
+	if err != nil {
+		t.Fatalf("Failed to get block SSZ: %v", err)
+	}
+
+	parsedBlock, err := ParseBeaconBlockSSZ(blockSSZ, version, forkSpec)
+	if err != nil {
+		t.Fatalf("Failed to parse block SSZ: %v", err)
+	}
+
+	// Get state SSZ
+	stateSSZ, err := pr.beaconClient.GetBeaconStateSSZ(ctx, fmt.Sprintf("%d", slot))
+	if err != nil {
+		t.Fatalf("Failed to get state SSZ: %v", err)
+	}
+
+	parsedState, err := ParseBeaconStateSSZ(stateSSZ, version, forkSpec)
+	if err != nil {
+		t.Fatalf("Failed to parse state SSZ: %v", err)
+	}
+
+	// Get next sync committee root from parsed state
+	// Note: We trust the state root from block header (parsedBlock.StateRoot) instead of computing it
+	// because state root computation is not needed for actual relay/prover processing
+	var nextSyncCommitteeRoot [32]byte
+	switch version {
+	case "fulu":
+		if parsedState.stateFulu.NextSyncCommittee != nil {
+			nextSyncCommitteeRoot, err = parsedState.stateFulu.NextSyncCommittee.HashTreeRoot()
+		}
+	case "electra":
+		if parsedState.stateElectra.NextSyncCommittee != nil {
+			nextSyncCommitteeRoot, err = parsedState.stateElectra.NextSyncCommittee.HashTreeRoot()
+		}
+	case "deneb":
+		if parsedState.stateDeneb.NextSyncCommittee != nil {
+			nextSyncCommitteeRoot, err = parsedState.stateDeneb.NextSyncCommittee.HashTreeRoot()
+		}
+	}
+	if err != nil {
+		t.Fatalf("Failed to compute next sync committee root: %v", err)
+	}
+
+	// Generate next sync committee branch
+	nextSCBranch, err := parsedState.GenerateNextSyncCommitteeBranch()
+	if err != nil {
+		t.Fatalf("GenerateNextSyncCommitteeBranch failed: %v", err)
+	}
+
+	t.Logf("Next sync committee branch length: %d", len(nextSCBranch))
+	t.Logf("Next sync committee root: %x", nextSyncCommitteeRoot)
+	t.Logf("State root: %x", parsedBlock.StateRoot)
+	t.Logf("Gindex: %d", forkSpec.NextSyncCommitteeGindex)
+
+	// Verify using ELC logic
+	err = isValidMerkleBranch(
+		nextSyncCommitteeRoot[:],         // leaf: hash_tree_root(next_sync_committee)
+		nextSCBranch,                     // branch
+		forkSpec.NextSyncCommitteeGindex, // gindex: 87 (electra) or 55 (deneb)
+		parsedBlock.StateRoot,            // root: state root
+	)
+	if err != nil {
+		t.Fatalf("Next sync committee branch verification failed (ELC-style): %v", err)
+	}
+
+	t.Log("Next sync committee branch verification passed!")
 }
