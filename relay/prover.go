@@ -621,8 +621,9 @@ func (pr *Prover) buildConsensusUpdateFromBeaconAPI(ctx context.Context, include
 		return nil, nil, fmt.Errorf("failed to find signature and attested slots: %w", err)
 	}
 
-	// 4. Build consensus update
-	return pr.buildConsensusUpdateWithSlots(ctx, signatureSlot, attestedSlot, "finalized", finalizedBlock.Version, includeNextSyncCommittee)
+	// 4. Build consensus update using the SPECIFIC finalized block root (not "finalized" tag which may change)
+	finalizedBlockId := finalizedBlockRoot.Data.Root.String()
+	return pr.buildConsensusUpdateWithSlots(ctx, signatureSlot, attestedSlot, finalizedBlockId, finalizedBlock.Version, includeNextSyncCommittee)
 }
 
 // getSyncCommitteesFromState retrieves current and next sync committees from beacon state
@@ -975,18 +976,31 @@ func (pr *Prover) compareWithLightClientAPI(ctx context.Context, update *lctypes
 	lcFinalizedSlot := uint64(lcFinalityUpdate.Data.FinalizedHeader.Beacon.Slot)
 	lcSignatureSlot := uint64(lcFinalityUpdate.Data.SignatureSlot)
 
+	// Compute LC finalized_root (hash_tree_root of finalized_header)
+	lcFinalizedRoot := computeBeaconBlockHeaderRootFromLC(&lcFinalityUpdate.Data.FinalizedHeader.Beacon)
+
 	logger.InfoContext(ctx, "[DEBUG] ===== CONSENSUS UPDATE COMPARISON =====")
 	logger.InfoContext(ctx, "[DEBUG] LC API finality_update",
 		"lc_attested_slot", lcAttestedSlot,
 		"lc_finalized_slot", lcFinalizedSlot,
-		"lc_signature_slot", lcSignatureSlot)
+		"lc_signature_slot", lcSignatureSlot,
+		"lc_finalized_root", fmt.Sprintf("0x%x", lcFinalizedRoot))
 
-	// Now build BeaconState-based update using the SAME finalized slot from LC API
-	// Get finalized block root from LC API
-	lcFinalizedRoot := computeBeaconBlockHeaderRootFromLC(&lcFinalityUpdate.Data.FinalizedHeader.Beacon)
+	// Also log BS update info
+	bsAttestedSlot := update.AttestedHeader.Slot
+	bsFinalizedSlot := update.FinalizedHeader.Slot
+	bsFinalizedRoot := computeBeaconBlockHeaderRootFromUpdate(update.FinalizedHeader)
 
-	logger.InfoContext(ctx, "[DEBUG] Using LC finalized_root to build BS update",
-		"finalized_root", fmt.Sprintf("0x%x", lcFinalizedRoot[:16]))
+	logger.InfoContext(ctx, "[DEBUG] BS ConsensusUpdate (actual)",
+		"bs_attested_slot", bsAttestedSlot,
+		"bs_finalized_slot", bsFinalizedSlot,
+		"bs_finalized_root", fmt.Sprintf("0x%x", bsFinalizedRoot))
+
+	// Compare finalized roots
+	logger.InfoContext(ctx, "[DEBUG] Finalized root match",
+		"match", bytesEqual(lcFinalizedRoot, bsFinalizedRoot))
+
+	logger.InfoContext(ctx, "[DEBUG] Now building BS update using LC's finalized_root...")
 
 	// Find signature and attested slots for this finalized block
 	bsSignatureSlot, bsAttestedSlot, err := pr.findSignatureAndAttestedSlot(ctx, lcFinalizedRoot, lcFinalizedSlot)
