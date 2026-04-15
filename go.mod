@@ -258,4 +258,4 @@ require (
 
 replace github.com/btcsuite/btcd/btcec/v2 => github.com/btcsuite/btcd/btcec/v2 v2.3.2
 
-replace github.com/OffchainLabs/prysm/v7 => github.com/yoshidan/prysm/v7 v7.1.3-p1
+replace github.com/OffchainLabs/prysm/v7 => github.com/yoshidan/prysm/v7 v7.1.3-p2

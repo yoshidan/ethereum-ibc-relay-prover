@@ -557,6 +557,15 @@ func TestVerifyFinalityBranchLikeELC(t *testing.T) {
 	t.Logf("State root: %x", parsedBlock.StateRoot)
 	t.Logf("Gindex: %d", forkSpec.FinalizedRootGindex)
 
+	// Output prover-generated data for Rust test verification
+	t.Logf("=== Prover Generated Data (for Rust test) ===")
+	t.Logf("leaf (finalized_checkpoint.root): 0x%x", finalizedCheckpointRoot)
+	t.Logf("root (attested_state_root): 0x%x", parsedBlock.StateRoot)
+	t.Logf("finality_branch:")
+	for i, hash := range finalityBranch {
+		t.Logf("  [%d]: 0x%x", i, hash)
+	}
+
 	// Verify using ELC logic
 	err = isValidMerkleBranch(
 		finalizedCheckpointRoot,          // leaf: finalized_checkpoint.root
@@ -656,4 +665,718 @@ func TestVerifyNextSyncCommitteeBranchLikeELC(t *testing.T) {
 	}
 
 	t.Log("Next sync committee branch verification passed!")
+}
+
+// TestVerifyConsensusUpdateFinalityBranch tests that consensus update's finality branch
+// is valid against the attested header's state root
+func TestVerifyConsensusUpdateFinalityBranch(t *testing.T) {
+	pr := newTestProver(t)
+	ctx := context.Background()
+
+	// Get finalized block info
+	block, err := pr.beaconClient.GetBeaconBlock(ctx, "finalized")
+	if err != nil {
+		t.Skipf("Beacon API not available: %v", err)
+	}
+
+	// Get head block to check if chain has enough blocks
+	headBlock, err := pr.beaconClient.GetBeaconBlock(ctx, "head")
+	if err != nil {
+		t.Fatalf("Failed to get head block: %v", err)
+	}
+
+	finalizedSlot := uint64(block.Data.Message.Slot)
+	headSlot := uint64(headBlock.Data.Message.Slot)
+
+	if headSlot < finalizedSlot+17 {
+		t.Skipf("Chain head (%d) is too close to finalized slot (%d), need more blocks", headSlot, finalizedSlot)
+	}
+
+	// Get finalized block root
+	finalizedBlockRoot, err := pr.beaconClient.GetBlockRootByID(ctx, "finalized", true)
+	if err != nil {
+		t.Fatalf("Failed to get finalized block root: %v", err)
+	}
+
+	// Find signature and attested slots
+	signatureSlot, attestedSlot, err := pr.findSignatureAndAttestedSlot(ctx, finalizedBlockRoot.Data.Root, finalizedSlot)
+	if err != nil {
+		t.Fatalf("findSignatureAndAttestedSlot failed: %v", err)
+	}
+
+	t.Logf("signature_slot=%d, attested_slot=%d, version=%s", signatureSlot, attestedSlot, block.Version)
+
+	// Build consensus update
+	update, _, err := pr.buildConsensusUpdateWithSlots(ctx, signatureSlot, attestedSlot, "finalized", block.Version, true)
+	if err != nil {
+		t.Fatalf("buildConsensusUpdateWithSlots failed: %v", err)
+	}
+
+	// Get fork spec
+	forkSpec := pr.getForkSpecForSlot(signatureSlot)
+	if forkSpec == nil {
+		t.Fatalf("getForkSpecForSlot returned nil for slot %d", signatureSlot)
+	}
+
+	t.Logf("=== Consensus Update Data ===")
+	t.Logf("attested_header.state_root: 0x%x", update.AttestedHeader.StateRoot)
+	t.Logf("finalized_header slot: %d", update.FinalizedHeader.Slot)
+	t.Logf("finality_branch length: %d", len(update.FinalizedHeaderBranch))
+	t.Logf("gindex: %d", forkSpec.FinalizedRootGindex)
+
+	// Get attested state to get the finalized checkpoint root (this is the actual leaf)
+	attestedStateSSZ, err := pr.beaconClient.GetBeaconStateSSZ(ctx, fmt.Sprintf("%d", attestedSlot))
+	if err != nil {
+		t.Fatalf("Failed to get attested state SSZ: %v", err)
+	}
+
+	parsedAttestedState, err := ParseBeaconStateSSZ(attestedStateSSZ, block.Version, forkSpec)
+	if err != nil {
+		t.Fatalf("Failed to parse attested state SSZ: %v", err)
+	}
+
+	// Get finalized checkpoint root from the attested state
+	var finalizedCheckpointRoot []byte
+	switch block.Version {
+	case "fulu":
+		finalizedCheckpointRoot = parsedAttestedState.stateFulu.FinalizedCheckpoint.Root
+	case "electra":
+		finalizedCheckpointRoot = parsedAttestedState.stateElectra.FinalizedCheckpoint.Root
+	case "deneb":
+		finalizedCheckpointRoot = parsedAttestedState.stateDeneb.FinalizedCheckpoint.Root
+	}
+
+	t.Logf("finalized_checkpoint.root (leaf): 0x%x", finalizedCheckpointRoot)
+
+	// Output branch for Rust test
+	t.Logf("=== Data for Rust Test ===")
+	t.Logf("leaf: 0x%x", finalizedCheckpointRoot)
+	t.Logf("root: 0x%x", update.AttestedHeader.StateRoot)
+	for i, hash := range update.FinalizedHeaderBranch {
+		t.Logf("branch[%d]: 0x%x", i, hash)
+	}
+
+	// Verify finality branch
+	err = isValidMerkleBranch(
+		finalizedCheckpointRoot,
+		update.FinalizedHeaderBranch,
+		forkSpec.FinalizedRootGindex,
+		update.AttestedHeader.StateRoot,
+	)
+	if err != nil {
+		t.Fatalf("Finality branch verification failed: %v", err)
+	}
+
+	t.Log("Consensus update finality branch verification passed!")
+}
+
+// TestCompareMultiplePeriods compares finality data across multiple periods
+func TestCompareMultiplePeriods(t *testing.T) {
+	pr := newTestProver(t)
+	ctx := context.Background()
+
+	// Get current finalized info
+	block, err := pr.beaconClient.GetBeaconBlock(ctx, "finalized")
+	if err != nil {
+		t.Skipf("Beacon API not available: %v", err)
+	}
+
+	finalizedSlot := uint64(block.Data.Message.Slot)
+	finalizedEpoch := pr.computeEpoch(finalizedSlot)
+	finalizedPeriod := pr.computeSyncCommitteePeriod(finalizedEpoch)
+
+	t.Logf("Current: finalized_slot=%d, epoch=%d, period=%d", finalizedSlot, finalizedEpoch, finalizedPeriod)
+
+	if finalizedPeriod < 1 {
+		t.Skipf("Need at least period 1 (current=%d)", finalizedPeriod)
+	}
+
+	type result struct {
+		period              uint64
+		attestedSlot        uint64
+		finalizedSlot       uint64
+		finalizedRootMatch  bool
+		stateRootMatch      bool
+		branchMatch         bool
+		lcVerifyPass        bool
+		bsVerifyPass        bool
+		lcFinalizedRoot     string
+		bsFinalizedRoot     string
+		lcStateRoot         string
+		bsStateRoot         string
+		branchMismatches    []int
+	}
+
+	var results []result
+
+	// Test each past period
+	for period := uint64(0); period < finalizedPeriod; period++ {
+		lcUpdate, err := pr.beaconClient.GetLightClientUpdate(ctx, period)
+		if err != nil {
+			t.Logf("Period %d: Failed to get LC update: %v", period, err)
+			continue
+		}
+
+		attestedSlot := uint64(lcUpdate.Data.AttestedHeader.Beacon.Slot)
+		finSlot := uint64(lcUpdate.Data.FinalizedHeader.Beacon.Slot)
+
+		res := result{
+			period:        period,
+			attestedSlot:  attestedSlot,
+			finalizedSlot: finSlot,
+		}
+
+		// Compute LC finalized_root
+		lcFinalizedRoot := computeBeaconBlockHeaderRoot(
+			uint64(lcUpdate.Data.FinalizedHeader.Beacon.Slot),
+			uint64(lcUpdate.Data.FinalizedHeader.Beacon.ProposerIndex),
+			lcUpdate.Data.FinalizedHeader.Beacon.ParentRoot,
+			lcUpdate.Data.FinalizedHeader.Beacon.StateRoot,
+			lcUpdate.Data.FinalizedHeader.Beacon.BodyRoot,
+		)
+		res.lcFinalizedRoot = fmt.Sprintf("0x%x", lcFinalizedRoot[:8])
+
+		// Get BeaconState data
+		forkSpec := pr.getForkSpecForSlot(attestedSlot)
+		attestedStateSSZ, err := pr.beaconClient.GetBeaconStateSSZ(ctx, fmt.Sprintf("%d", attestedSlot))
+		if err != nil {
+			t.Logf("Period %d: Failed to get state SSZ: %v", period, err)
+			continue
+		}
+
+		parsedState, err := ParseBeaconStateSSZ(attestedStateSSZ, lcUpdate.Version, forkSpec)
+		if err != nil {
+			t.Logf("Period %d: Failed to parse state: %v", period, err)
+			continue
+		}
+
+		// Get finalized checkpoint root
+		var bsFinalizedRoot []byte
+		switch lcUpdate.Version {
+		case "fulu":
+			bsFinalizedRoot = parsedState.stateFulu.FinalizedCheckpoint.Root
+		case "electra":
+			bsFinalizedRoot = parsedState.stateElectra.FinalizedCheckpoint.Root
+		case "deneb":
+			bsFinalizedRoot = parsedState.stateDeneb.FinalizedCheckpoint.Root
+		}
+		res.bsFinalizedRoot = fmt.Sprintf("0x%x", bsFinalizedRoot[:8])
+
+		// Generate branch from BeaconState
+		bsBranch, err := parsedState.GenerateFinalityBranch()
+		if err != nil {
+			t.Logf("Period %d: Failed to generate branch: %v", period, err)
+			continue
+		}
+
+		// Get attested block for state_root
+		attestedBlockSSZ, err := pr.beaconClient.GetBeaconBlockSSZ(ctx, fmt.Sprintf("%d", attestedSlot))
+		if err != nil {
+			t.Logf("Period %d: Failed to get block SSZ: %v", period, err)
+			continue
+		}
+		parsedBlock, err := ParseBeaconBlockSSZ(attestedBlockSSZ, lcUpdate.Version, forkSpec)
+		if err != nil {
+			t.Logf("Period %d: Failed to parse block: %v", period, err)
+			continue
+		}
+
+		// Compare
+		res.finalizedRootMatch = bytes.Equal(lcFinalizedRoot, bsFinalizedRoot)
+
+		lcStateRoot := []byte(lcUpdate.Data.AttestedHeader.Beacon.StateRoot)
+		bsStateRoot := parsedBlock.StateRoot
+		res.lcStateRoot = fmt.Sprintf("0x%x", lcStateRoot[:8])
+		res.bsStateRoot = fmt.Sprintf("0x%x", bsStateRoot[:8])
+		res.stateRootMatch = bytes.Equal(lcStateRoot, bsStateRoot)
+
+		// Compare branches
+		res.branchMatch = true
+		lcBranch := make([][]byte, len(lcUpdate.Data.FinalityBranch))
+		for i, b := range lcUpdate.Data.FinalityBranch {
+			lcBranch[i] = b
+			if !bytes.Equal([]byte(b), bsBranch[i]) {
+				res.branchMatch = false
+				res.branchMismatches = append(res.branchMismatches, i)
+			}
+		}
+
+		// Verify
+		err = isValidMerkleBranch(lcFinalizedRoot, lcBranch, forkSpec.FinalizedRootGindex, lcStateRoot)
+		res.lcVerifyPass = err == nil
+
+		err = isValidMerkleBranch(bsFinalizedRoot, bsBranch, forkSpec.FinalizedRootGindex, bsStateRoot)
+		res.bsVerifyPass = err == nil
+
+		results = append(results, res)
+	}
+
+	// Print table
+	t.Logf("\n=== COMPARISON TABLE ===")
+	t.Logf("| Period | Attested | Finalized | Root | State | Branch | LC✓ | BS✓ |")
+	t.Logf("|--------|----------|-----------|------|-------|--------|-----|-----|")
+
+	allMatch := true
+	for _, r := range results {
+		rootIcon := "✅"
+		if !r.finalizedRootMatch {
+			rootIcon = "❌"
+			allMatch = false
+		}
+		stateIcon := "✅"
+		if !r.stateRootMatch {
+			stateIcon = "❌"
+			allMatch = false
+		}
+		branchIcon := "✅"
+		if !r.branchMatch {
+			branchIcon = fmt.Sprintf("❌%v", r.branchMismatches)
+			allMatch = false
+		}
+		lcIcon := "✅"
+		if !r.lcVerifyPass {
+			lcIcon = "❌"
+			allMatch = false
+		}
+		bsIcon := "✅"
+		if !r.bsVerifyPass {
+			bsIcon = "❌"
+			allMatch = false
+		}
+
+		t.Logf("| %6d | %8d | %9d | %s | %s | %s | %s | %s |",
+			r.period, r.attestedSlot, r.finalizedSlot,
+			rootIcon, stateIcon, branchIcon, lcIcon, bsIcon)
+	}
+
+	if allMatch {
+		t.Logf("\nAll periods match! ✅")
+	} else {
+		t.Logf("\nSome periods have mismatches! ❌")
+	}
+}
+
+// TestCompareLightClientAPIvsBeaconState compares finality data from Light Client API vs BeaconState generation
+func TestCompareLightClientAPIvsBeaconState(t *testing.T) {
+	pr := newTestProver(t)
+	ctx := context.Background()
+
+	// Get Light Client Finality Update (current finalized state)
+	lcFinalityUpdate, err := pr.beaconClient.GetLightClientFinalityUpdate(ctx)
+	if err != nil {
+		t.Skipf("Light Client API not available: %v", err)
+	}
+
+	t.Logf("=== Light Client API Data ===")
+	t.Logf("version: %s", lcFinalityUpdate.Version)
+	t.Logf("attested_header.slot: %d", lcFinalityUpdate.Data.AttestedHeader.Beacon.Slot)
+	t.Logf("attested_header.state_root: 0x%x", lcFinalityUpdate.Data.AttestedHeader.Beacon.StateRoot)
+	t.Logf("finalized_header.slot: %d", lcFinalityUpdate.Data.FinalizedHeader.Beacon.Slot)
+	t.Logf("signature_slot: %d", lcFinalityUpdate.Data.SignatureSlot)
+
+	// Compute finalized_root from Light Client API's finalized_header
+	lcFinalizedRoot := computeBeaconBlockHeaderRoot(
+		uint64(lcFinalityUpdate.Data.FinalizedHeader.Beacon.Slot),
+		uint64(lcFinalityUpdate.Data.FinalizedHeader.Beacon.ProposerIndex),
+		lcFinalityUpdate.Data.FinalizedHeader.Beacon.ParentRoot,
+		lcFinalityUpdate.Data.FinalizedHeader.Beacon.StateRoot,
+		lcFinalityUpdate.Data.FinalizedHeader.Beacon.BodyRoot,
+	)
+	t.Logf("finalized_root (hash_tree_root of finalized_header): 0x%x", lcFinalizedRoot)
+
+	// Log finality branch from Light Client API
+	// Note: hexutil.Bytes with %x prints hex of string, use []byte conversion
+	t.Logf("finality_branch (from LC API):")
+	for i, b := range lcFinalityUpdate.Data.FinalityBranch {
+		t.Logf("  branch[%d]: 0x%x", i, []byte(b))
+	}
+
+	// Now get the same data from BeaconState
+	attestedSlot := uint64(lcFinalityUpdate.Data.AttestedHeader.Beacon.Slot)
+	signatureSlot := uint64(lcFinalityUpdate.Data.SignatureSlot)
+
+	t.Logf("\n=== BeaconState Generated Data ===")
+
+	// Get fork spec
+	forkSpec := pr.getForkSpecForSlot(signatureSlot)
+	if forkSpec == nil {
+		t.Fatalf("getForkSpecForSlot returned nil for slot %d", signatureSlot)
+	}
+
+	// Get attested state SSZ
+	attestedStateSSZ, err := pr.beaconClient.GetBeaconStateSSZ(ctx, fmt.Sprintf("%d", attestedSlot))
+	if err != nil {
+		t.Logf("Failed to get attested state SSZ: %v", err)
+		t.Logf("Skipping BeaconState comparison due to SSZ fetch error")
+		goto verifyLCAPIOnly
+	}
+
+	{
+		parsedAttestedState, err := ParseBeaconStateSSZ(attestedStateSSZ, lcFinalityUpdate.Version, forkSpec)
+		if err != nil {
+			t.Logf("Failed to parse attested state SSZ: %v", err)
+			t.Logf("This is expected if chain uses minimal preset but Go code uses mainnet types")
+			t.Logf("Skipping BeaconState comparison due to SSZ parse error")
+			goto verifyLCAPIOnly
+		}
+
+		// Get finalized checkpoint root from the attested state
+		var bsFinalizedCheckpointRoot []byte
+		switch lcFinalityUpdate.Version {
+		case "fulu":
+			bsFinalizedCheckpointRoot = parsedAttestedState.stateFulu.FinalizedCheckpoint.Root
+		case "electra":
+			bsFinalizedCheckpointRoot = parsedAttestedState.stateElectra.FinalizedCheckpoint.Root
+		case "deneb":
+			bsFinalizedCheckpointRoot = parsedAttestedState.stateDeneb.FinalizedCheckpoint.Root
+		}
+		t.Logf("finalized_checkpoint.root (from BeaconState): 0x%x", bsFinalizedCheckpointRoot)
+
+		// Generate finality branch from BeaconState
+		bsFinalityBranch, err := parsedAttestedState.GenerateFinalityBranch()
+		if err != nil {
+			t.Fatalf("Failed to generate finality branch: %v", err)
+		}
+
+		t.Logf("finality_branch (from BeaconState):")
+		for i, b := range bsFinalityBranch {
+			t.Logf("  branch[%d]: 0x%x", i, b)
+		}
+
+		// Get attested block to get state_root
+		attestedBlockSSZ, err := pr.beaconClient.GetBeaconBlockSSZ(ctx, fmt.Sprintf("%d", attestedSlot))
+		if err != nil {
+			t.Fatalf("Failed to get attested block SSZ: %v", err)
+		}
+
+		parsedAttestedBlock, err := ParseBeaconBlockSSZ(attestedBlockSSZ, lcFinalityUpdate.Version, forkSpec)
+		if err != nil {
+			t.Fatalf("Failed to parse attested block SSZ: %v", err)
+		}
+		t.Logf("attested_header.state_root (from BeaconBlock): 0x%x", parsedAttestedBlock.StateRoot)
+
+		// === COMPARISON ===
+		t.Logf("\n=== COMPARISON ===")
+
+		// Compare finalized_root
+		lcFinalizedRootMatch := bytes.Equal(lcFinalizedRoot, bsFinalizedCheckpointRoot)
+		t.Logf("finalized_root match: %v", lcFinalizedRootMatch)
+		if !lcFinalizedRootMatch {
+			t.Logf("  LC API finalized_root:     0x%x", lcFinalizedRoot)
+			t.Logf("  BeaconState checkpoint:    0x%x", bsFinalizedCheckpointRoot)
+		}
+
+		// Compare state_root
+		lcStateRoot := []byte(lcFinalityUpdate.Data.AttestedHeader.Beacon.StateRoot)
+		bsStateRoot := parsedAttestedBlock.StateRoot
+		stateRootMatch := bytes.Equal(lcStateRoot, bsStateRoot)
+		t.Logf("attested_header.state_root match: %v", stateRootMatch)
+		if !stateRootMatch {
+			t.Logf("  LC API state_root:      0x%x", lcStateRoot)
+			t.Logf("  BeaconBlock state_root: 0x%x", bsStateRoot)
+		}
+
+		// Compare finality branch
+		branchMatch := true
+		if len(lcFinalityUpdate.Data.FinalityBranch) != len(bsFinalityBranch) {
+			branchMatch = false
+			t.Logf("finality_branch length mismatch: LC=%d, BS=%d",
+				len(lcFinalityUpdate.Data.FinalityBranch), len(bsFinalityBranch))
+		} else {
+			for i := range bsFinalityBranch {
+				if !bytes.Equal([]byte(lcFinalityUpdate.Data.FinalityBranch[i]), bsFinalityBranch[i]) {
+					branchMatch = false
+					t.Logf("finality_branch[%d] mismatch:", i)
+					t.Logf("  LC API:      0x%x", []byte(lcFinalityUpdate.Data.FinalityBranch[i]))
+					t.Logf("  BeaconState: 0x%x", bsFinalityBranch[i])
+				}
+			}
+		}
+		t.Logf("finality_branch match: %v", branchMatch)
+
+		// Verify both branches
+		t.Logf("\n=== VERIFICATION ===")
+
+		// Verify LC API branch
+		lcBranch := make([][]byte, len(lcFinalityUpdate.Data.FinalityBranch))
+		for i, b := range lcFinalityUpdate.Data.FinalityBranch {
+			lcBranch[i] = b
+		}
+		err = isValidMerkleBranch(lcFinalizedRoot, lcBranch, forkSpec.FinalizedRootGindex, lcStateRoot)
+		if err != nil {
+			t.Logf("LC API branch verification FAILED: %v", err)
+		} else {
+			t.Logf("LC API branch verification PASSED")
+		}
+
+		// Verify BeaconState branch
+		err = isValidMerkleBranch(bsFinalizedCheckpointRoot, bsFinalityBranch, forkSpec.FinalizedRootGindex, bsStateRoot)
+		if err != nil {
+			t.Logf("BeaconState branch verification FAILED: %v", err)
+		} else {
+			t.Logf("BeaconState branch verification PASSED")
+		}
+		return
+	}
+
+verifyLCAPIOnly:
+	// Only verify LC API branch when BeaconState parsing fails
+	t.Logf("\n=== VERIFICATION (LC API only) ===")
+	lcBranch := make([][]byte, len(lcFinalityUpdate.Data.FinalityBranch))
+	for i, b := range lcFinalityUpdate.Data.FinalityBranch {
+		lcBranch[i] = b
+	}
+	lcStateRoot := []byte(lcFinalityUpdate.Data.AttestedHeader.Beacon.StateRoot)
+	err = isValidMerkleBranch(lcFinalizedRoot, lcBranch, forkSpec.FinalizedRootGindex, lcStateRoot)
+	if err != nil {
+		t.Logf("LC API branch verification FAILED: %v", err)
+	} else {
+		t.Logf("LC API branch verification PASSED")
+	}
+}
+
+// TestLightClientAPIForPeriodUpdate tests using the Light Client API for period updates
+func TestLightClientAPIForPeriodUpdate(t *testing.T) {
+	pr := newTestProver(t)
+	ctx := context.Background()
+
+	// Get finalized block info
+	block, err := pr.beaconClient.GetBeaconBlock(ctx, "finalized")
+	if err != nil {
+		t.Skipf("Beacon API not available: %v", err)
+	}
+
+	finalizedSlot := uint64(block.Data.Message.Slot)
+	finalizedEpoch := pr.computeEpoch(finalizedSlot)
+	finalizedPeriod := pr.computeSyncCommitteePeriod(finalizedEpoch)
+
+	t.Logf("finalized_slot=%d, finalized_epoch=%d, finalized_period=%d, version=%s",
+		finalizedSlot, finalizedEpoch, finalizedPeriod, block.Version)
+
+	if finalizedPeriod < 1 {
+		t.Skipf("Need at least period 1 to be finalized (current finalized_period=%d)", finalizedPeriod)
+	}
+
+	// Test Light Client API for each past period
+	for period := uint64(0); period < finalizedPeriod; period++ {
+		t.Run(fmt.Sprintf("period_%d", period), func(t *testing.T) {
+			// Try to get light client update for this period
+			lcUpdate, err := pr.beaconClient.GetLightClientUpdate(ctx, period)
+			if err != nil {
+				t.Fatalf("GetLightClientUpdate failed for period %d: %v", period, err)
+			}
+
+			t.Logf("Light Client Update for period %d:", period)
+			t.Logf("  version=%s", lcUpdate.Version)
+			t.Logf("  attested_header slot=%d", lcUpdate.Data.AttestedHeader.Beacon.Slot)
+			t.Logf("  finalized_header slot=%d", lcUpdate.Data.FinalizedHeader.Beacon.Slot)
+			t.Logf("  finality_branch length=%d", len(lcUpdate.Data.FinalityBranch))
+			t.Logf("  signature_slot=%d", lcUpdate.Data.SignatureSlot)
+
+			// Get fork spec for this slot
+			forkSpec := pr.getForkSpecForSlot(uint64(lcUpdate.Data.AttestedHeader.Beacon.Slot))
+			if forkSpec == nil {
+				t.Fatalf("getForkSpecForSlot returned nil")
+			}
+
+			// The leaf for finality branch verification is hash_tree_root(finalized_beacon_header)
+			// which should match finalized_checkpoint.root in the attested state
+			// We can compute this from the finalized_header beacon block header
+			finalizedBeaconHeader := lcUpdate.Data.FinalizedHeader.Beacon
+
+			// Compute hash_tree_root of finalized beacon header
+			// Using ssz library to compute the root
+			leaf := computeBeaconBlockHeaderRoot(
+				uint64(finalizedBeaconHeader.Slot),
+				uint64(finalizedBeaconHeader.ProposerIndex),
+				finalizedBeaconHeader.ParentRoot,
+				finalizedBeaconHeader.StateRoot,
+				finalizedBeaconHeader.BodyRoot,
+			)
+
+			t.Logf("  finalized_header hash_tree_root (leaf): 0x%x", leaf)
+			t.Logf("  attested_header.state_root (expected root): 0x%x", lcUpdate.Data.AttestedHeader.Beacon.StateRoot)
+
+			// Convert branch to [][]byte
+			branch := make([][]byte, len(lcUpdate.Data.FinalityBranch))
+			for i, b := range lcUpdate.Data.FinalityBranch {
+				branch[i] = b
+			}
+
+			// Output branch for debugging
+			for i, b := range branch {
+				t.Logf("  branch[%d]: 0x%x", i, b)
+			}
+
+			// Verify finality branch
+			err = isValidMerkleBranch(
+				leaf,
+				branch,
+				forkSpec.FinalizedRootGindex,
+				lcUpdate.Data.AttestedHeader.Beacon.StateRoot,
+			)
+			if err != nil {
+				t.Fatalf("Light Client API finality branch verification failed for period %d: %v", period, err)
+			}
+
+			t.Logf("  Finality branch verification PASSED for period %d", period)
+		})
+	}
+}
+
+// computeBeaconBlockHeaderRoot computes the hash_tree_root of a BeaconBlockHeader
+func computeBeaconBlockHeaderRoot(slot, proposerIndex uint64, parentRoot, stateRoot, bodyRoot []byte) []byte {
+	// BeaconBlockHeader has 5 fields, all fixed size:
+	// slot: uint64
+	// proposer_index: uint64
+	// parent_root: Bytes32
+	// state_root: Bytes32
+	// body_root: Bytes32
+
+	// Pad each field to 32 bytes and compute merkle root
+	// For uint64, pad to 32 bytes (little endian)
+	slotBytes := make([]byte, 32)
+	proposerIndexBytes := make([]byte, 32)
+
+	// Little endian encoding
+	for i := 0; i < 8; i++ {
+		slotBytes[i] = byte(slot >> (8 * i))
+		proposerIndexBytes[i] = byte(proposerIndex >> (8 * i))
+	}
+
+	// Create leaves for merkle tree (5 leaves, pad to 8 for power of 2)
+	leaves := make([][]byte, 8)
+	leaves[0] = slotBytes
+	leaves[1] = proposerIndexBytes
+	leaves[2] = parentRoot
+	leaves[3] = stateRoot
+	leaves[4] = bodyRoot
+	// Padding with zero hashes
+	zeroHash := make([]byte, 32)
+	leaves[5] = zeroHash
+	leaves[6] = zeroHash
+	leaves[7] = zeroHash
+
+	// Compute merkle root
+	return computeMerkleRoot(leaves)
+}
+
+// computeMerkleRoot computes merkle root from leaves (must be power of 2)
+func computeMerkleRoot(leaves [][]byte) []byte {
+	if len(leaves) == 1 {
+		return leaves[0]
+	}
+
+	newLeaves := make([][]byte, len(leaves)/2)
+	for i := 0; i < len(leaves)/2; i++ {
+		combined := append(leaves[2*i], leaves[2*i+1]...)
+		h := sha256.Sum256(combined)
+		newLeaves[i] = h[:]
+	}
+	return computeMerkleRoot(newLeaves)
+}
+
+// TestBuildConsensusUpdateForPeriod tests that buildConsensusUpdateForPeriod generates
+// valid finality branches for past periods (intermediate header generation)
+func TestBuildConsensusUpdateForPeriod(t *testing.T) {
+	pr := newTestProver(t)
+	ctx := context.Background()
+
+	// Get finalized block info
+	block, err := pr.beaconClient.GetBeaconBlock(ctx, "finalized")
+	if err != nil {
+		t.Skipf("Beacon API not available: %v", err)
+	}
+
+	finalizedSlot := uint64(block.Data.Message.Slot)
+	finalizedEpoch := pr.computeEpoch(finalizedSlot)
+	finalizedPeriod := pr.computeSyncCommitteePeriod(finalizedEpoch)
+
+	t.Logf("finalized_slot=%d, finalized_epoch=%d, finalized_period=%d, version=%s",
+		finalizedSlot, finalizedEpoch, finalizedPeriod, block.Version)
+
+	// For minimal preset: SLOTS_PER_EPOCH=8, EPOCHS_PER_SYNC_COMMITTEE_PERIOD=8
+	// So period 0 = slots 0-63, period 1 = slots 64-127, etc.
+	slotsPerPeriod := pr.slotsPerEpoch() * pr.epochsPerSyncCommitteePeriod()
+	t.Logf("slots_per_period=%d", slotsPerPeriod)
+
+	if finalizedPeriod < 1 {
+		t.Skipf("Need at least period 1 to be finalized (current finalized_period=%d)", finalizedPeriod)
+	}
+
+	// Test building consensus update for each past period
+	for period := uint64(0); period < finalizedPeriod; period++ {
+		t.Run(fmt.Sprintf("period_%d", period), func(t *testing.T) {
+			t.Logf("Testing buildConsensusUpdateForPeriod for period %d", period)
+
+			// Build consensus update for this period
+			update, execPayload, err := pr.buildConsensusUpdateForPeriod(ctx, period)
+			if err != nil {
+				t.Fatalf("buildConsensusUpdateForPeriod failed for period %d: %v", period, err)
+			}
+
+			t.Logf("  attested_slot=%d, finalized_slot=%d", update.AttestedHeader.Slot, update.FinalizedHeader.Slot)
+			t.Logf("  attested_header.state_root: 0x%x", update.AttestedHeader.StateRoot)
+			t.Logf("  execution_block_number=%d", execPayload.BlockNumber)
+			t.Logf("  finality_branch length=%d", len(update.FinalizedHeaderBranch))
+
+			// Get fork spec for this slot
+			forkSpec := pr.getForkSpecForSlot(update.AttestedHeader.Slot)
+			if forkSpec == nil {
+				t.Fatalf("getForkSpecForSlot returned nil for slot %d", update.AttestedHeader.Slot)
+			}
+
+			t.Logf("  gindex=%d", forkSpec.FinalizedRootGindex)
+
+			// Get the attested state to get the actual leaf value (finalized_checkpoint.root)
+			attestedStateSSZ, err := pr.beaconClient.GetBeaconStateSSZ(ctx, fmt.Sprintf("%d", update.AttestedHeader.Slot))
+			if err != nil {
+				t.Fatalf("Failed to get attested state SSZ: %v", err)
+			}
+
+			// Determine version for parsing
+			attestedBlock, err := pr.beaconClient.GetBeaconBlock(ctx, fmt.Sprintf("%d", update.AttestedHeader.Slot))
+			if err != nil {
+				t.Fatalf("Failed to get attested block: %v", err)
+			}
+
+			parsedAttestedState, err := ParseBeaconStateSSZ(attestedStateSSZ, attestedBlock.Version, forkSpec)
+			if err != nil {
+				t.Fatalf("Failed to parse attested state SSZ: %v", err)
+			}
+
+			// Get finalized checkpoint root from the attested state
+			var finalizedCheckpointRoot []byte
+			switch attestedBlock.Version {
+			case "fulu":
+				finalizedCheckpointRoot = parsedAttestedState.stateFulu.FinalizedCheckpoint.Root
+			case "electra":
+				finalizedCheckpointRoot = parsedAttestedState.stateElectra.FinalizedCheckpoint.Root
+			case "deneb":
+				finalizedCheckpointRoot = parsedAttestedState.stateDeneb.FinalizedCheckpoint.Root
+			}
+
+			t.Logf("  finalized_checkpoint.root (leaf): 0x%x", finalizedCheckpointRoot)
+
+			// Verify finality branch
+			err = isValidMerkleBranch(
+				finalizedCheckpointRoot,
+				update.FinalizedHeaderBranch,
+				forkSpec.FinalizedRootGindex,
+				update.AttestedHeader.StateRoot,
+			)
+			if err != nil {
+				// Output debug info for failed verification
+				t.Logf("=== FAILED: Data for Rust Test ===")
+				t.Logf("leaf: 0x%x", finalizedCheckpointRoot)
+				t.Logf("root: 0x%x", update.AttestedHeader.StateRoot)
+				for i, hash := range update.FinalizedHeaderBranch {
+					t.Logf("branch[%d]: 0x%x", i, hash)
+				}
+				t.Fatalf("Finality branch verification failed for period %d: %v", period, err)
+			}
+
+			t.Logf("  Finality branch verification PASSED for period %d", period)
+		})
+	}
 }

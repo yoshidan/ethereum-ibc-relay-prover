@@ -107,7 +107,7 @@ var _ core.Chain = (*mockChain)(nil)
 func getBeaconEndpoint() string {
 	endpoint := os.Getenv("BEACON_ENDPOINT")
 	if endpoint == "" {
-		endpoint = "http://localhost:59796"
+		endpoint = "http://localhost:19596"
 	}
 	return endpoint
 }

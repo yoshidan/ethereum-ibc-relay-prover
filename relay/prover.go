@@ -16,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/hyperledger-labs/yui-relayer/core"
 	"github.com/hyperledger-labs/yui-relayer/log"
+	fastssz "github.com/prysmaticlabs/fastssz"
 )
 
 var IBCCommitmentsSlot = common.HexToHash("1ee222554989dda120e26ecacf756fe1235cd8d726706b57517715dde4f0c900")
@@ -904,7 +905,156 @@ func (pr *Prover) buildConsensusUpdateWithSlots(ctx context.Context, signatureSl
 		update.NextSyncCommitteeBranch = nextSyncCommitteeBranch
 	}
 
+	// Debug: Compare with Light Client API
+	pr.compareWithLightClientAPI(ctx, update, attestedSlot)
+
 	return update, parsedFinalizedBlock.ExecutionPayload, nil
+}
+
+// compareWithLightClientAPI compares BeaconState-generated values with Light Client API values
+func (pr *Prover) compareWithLightClientAPI(ctx context.Context, update *lctypes.ConsensusUpdate, attestedSlot uint64) {
+	logger := pr.GetLogger()
+
+	// Try to get Light Client finality update
+	lcUpdate, err := pr.beaconClient.GetLightClientFinalityUpdate(ctx)
+	if err != nil {
+		logger.WarnContext(ctx, "[DEBUG] Failed to get Light Client API finality update", "err", err)
+		return
+	}
+
+	// Check if the slots match
+	lcAttestedSlot := uint64(lcUpdate.Data.AttestedHeader.Beacon.Slot)
+	lcFinalizedSlot := uint64(lcUpdate.Data.FinalizedHeader.Beacon.Slot)
+	bsAttestedSlot := update.AttestedHeader.Slot
+	bsFinalizedSlot := update.FinalizedHeader.Slot
+
+	logger.InfoContext(ctx, "[DEBUG] ===== CONSENSUS UPDATE COMPARISON =====")
+	logger.InfoContext(ctx, "[DEBUG] Slots",
+		"lc_attested_slot", lcAttestedSlot,
+		"bs_attested_slot", bsAttestedSlot,
+		"lc_finalized_slot", lcFinalizedSlot,
+		"bs_finalized_slot", bsFinalizedSlot)
+
+	// If slots don't match, try to get LC update for the specific period
+	if lcAttestedSlot != bsAttestedSlot {
+		logger.WarnContext(ctx, "[DEBUG] Attested slots don't match, trying period update...")
+		period := pr.computeSyncCommitteePeriod(pr.computeEpoch(bsAttestedSlot))
+		lcPeriodUpdate, err := pr.beaconClient.GetLightClientUpdate(ctx, period)
+		if err != nil {
+			logger.WarnContext(ctx, "[DEBUG] Failed to get LC period update", "period", period, "err", err)
+		} else {
+			lcAttestedSlot = uint64(lcPeriodUpdate.Data.AttestedHeader.Beacon.Slot)
+			lcFinalizedSlot = uint64(lcPeriodUpdate.Data.FinalizedHeader.Beacon.Slot)
+			logger.InfoContext(ctx, "[DEBUG] Using period update",
+				"period", period,
+				"lc_attested_slot", lcAttestedSlot,
+				"lc_finalized_slot", lcFinalizedSlot)
+
+			// Compare finalized header root
+			lcFinalizedRoot := computeBeaconBlockHeaderRootFromLC(&lcPeriodUpdate.Data.FinalizedHeader.Beacon)
+			bsFinalizedRoot := computeBeaconBlockHeaderRootFromUpdate(update.FinalizedHeader)
+			logger.InfoContext(ctx, "[DEBUG] Finalized Root",
+				"lc", fmt.Sprintf("0x%x", lcFinalizedRoot),
+				"bs", fmt.Sprintf("0x%x", bsFinalizedRoot),
+				"match", bytesEqual(lcFinalizedRoot, bsFinalizedRoot))
+
+			// Compare attested header state_root
+			lcStateRoot := []byte(lcPeriodUpdate.Data.AttestedHeader.Beacon.StateRoot)
+			bsStateRoot := update.AttestedHeader.StateRoot
+			logger.InfoContext(ctx, "[DEBUG] Attested StateRoot",
+				"lc", fmt.Sprintf("0x%x", lcStateRoot),
+				"bs", fmt.Sprintf("0x%x", bsStateRoot),
+				"match", bytesEqual(lcStateRoot, bsStateRoot))
+
+			// Compare finality branch
+			logger.InfoContext(ctx, "[DEBUG] Finality Branch comparison (LC vs BS):")
+			lcBranch := lcPeriodUpdate.Data.FinalityBranch
+			bsBranch := update.FinalizedHeaderBranch
+			logger.InfoContext(ctx, "[DEBUG] Branch lengths", "lc_len", len(lcBranch), "bs_len", len(bsBranch))
+			minLen := len(lcBranch)
+			if len(bsBranch) < minLen {
+				minLen = len(bsBranch)
+			}
+			allMatch := true
+			for i := 0; i < minLen; i++ {
+				lcVal := []byte(lcBranch[i])
+				bsVal := bsBranch[i]
+				match := bytesEqual(lcVal, bsVal)
+				if !match {
+					allMatch = false
+				}
+				logger.InfoContext(ctx, fmt.Sprintf("[DEBUG] Branch[%d]", i),
+					"lc", fmt.Sprintf("0x%x", lcVal),
+					"bs", fmt.Sprintf("0x%x", bsVal),
+					"match", match)
+			}
+			logger.InfoContext(ctx, "[DEBUG] All branch elements match", "result", allMatch)
+			return
+		}
+	}
+
+	// Compare using finality update
+	lcFinalizedRoot := computeBeaconBlockHeaderRootFromLC(&lcUpdate.Data.FinalizedHeader.Beacon)
+	bsFinalizedRoot := computeBeaconBlockHeaderRootFromUpdate(update.FinalizedHeader)
+	logger.InfoContext(ctx, "[DEBUG] Finalized Root",
+		"lc", fmt.Sprintf("0x%x", lcFinalizedRoot),
+		"bs", fmt.Sprintf("0x%x", bsFinalizedRoot),
+		"match", bytesEqual(lcFinalizedRoot, bsFinalizedRoot))
+
+	// Compare attested header state_root
+	lcStateRoot := []byte(lcUpdate.Data.AttestedHeader.Beacon.StateRoot)
+	bsStateRoot := update.AttestedHeader.StateRoot
+	logger.InfoContext(ctx, "[DEBUG] Attested StateRoot",
+		"lc", fmt.Sprintf("0x%x", lcStateRoot),
+		"bs", fmt.Sprintf("0x%x", bsStateRoot),
+		"match", bytesEqual(lcStateRoot, bsStateRoot))
+
+	// Compare finality branch
+	logger.InfoContext(ctx, "[DEBUG] Finality Branch comparison (LC vs BS):")
+	lcBranch := lcUpdate.Data.FinalityBranch
+	bsBranch := update.FinalizedHeaderBranch
+	logger.InfoContext(ctx, "[DEBUG] Branch lengths", "lc_len", len(lcBranch), "bs_len", len(bsBranch))
+	minLen := len(lcBranch)
+	if len(bsBranch) < minLen {
+		minLen = len(bsBranch)
+	}
+	allMatch := true
+	for i := 0; i < minLen; i++ {
+		lcVal := []byte(lcBranch[i])
+		bsVal := bsBranch[i]
+		match := bytesEqual(lcVal, bsVal)
+		if !match {
+			allMatch = false
+		}
+		logger.InfoContext(ctx, fmt.Sprintf("[DEBUG] Branch[%d]", i),
+			"lc", fmt.Sprintf("0x%x", lcVal),
+			"bs", fmt.Sprintf("0x%x", bsVal),
+			"match", match)
+	}
+	logger.InfoContext(ctx, "[DEBUG] All branch elements match", "result", allMatch)
+	logger.InfoContext(ctx, "[DEBUG] ===== END COMPARISON =====")
+}
+
+// computeBeaconBlockHeaderRootFromLC computes the hash tree root of a beacon block header from Light Client API
+func computeBeaconBlockHeaderRootFromLC(header *beacon.BeaconBlockHeader) []byte {
+	root, err := header.HashTreeRoot()
+	if err != nil {
+		return nil
+	}
+	return root[:]
+}
+
+// computeBeaconBlockHeaderRootFromUpdate computes the hash tree root of a beacon block header from ConsensusUpdate
+func computeBeaconBlockHeaderRootFromUpdate(header *lctypes.BeaconBlockHeader) []byte {
+	hh := fastssz.NewHasher()
+	hh.PutUint64(header.Slot)
+	hh.PutUint64(header.ProposerIndex)
+	hh.PutBytes(header.ParentRoot)
+	hh.PutBytes(header.StateRoot)
+	hh.PutBytes(header.BodyRoot)
+	hh.MerkleizeWithMixin(0, 5, 8)
+	root, _ := hh.HashRoot()
+	return root[:]
 }
 
 // findValidBlockSlot finds a valid block slot at or before the target slot
