@@ -677,8 +677,8 @@ func computeWithdrawalsRoot(withdrawals []*enginev1.Withdrawal) ([32]byte, error
 	}
 
 	// Create Merkle tree from withdrawal roots
-	const MAX_WITHDRAWALS_PER_PAYLOAD = 16
-	root, err := ssz.BitwiseMerkleize(wRoots, uint64(len(wRoots)), MAX_WITHDRAWALS_PER_PAYLOAD)
+	// Use fieldparams for preset-specific limit (minimal: 4, mainnet: 16)
+	root, err := ssz.BitwiseMerkleize(wRoots, uint64(len(wRoots)), fieldparams.MaxWithdrawalsPerPayload)
 	if err != nil {
 		return [32]byte{}, err
 	}
