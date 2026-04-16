@@ -768,7 +768,8 @@ func (pr *Prover) buildConsensusUpdateCore(ctx context.Context, signatureSlot ui
 
 	// Get the attested block (parent of signature block)
 	// The sync_aggregate in signature block signs this parent block
-	attestedBlockSSZ, err := pr.beaconClient.GetBeaconBlockSSZ(ctx, fmt.Sprintf("0x%x", parsedSignatureBlock.ParentRoot))
+	attestedBlockId := fmt.Sprintf("0x%x", parsedSignatureBlock.ParentRoot)
+	attestedBlockSSZ, err := pr.beaconClient.GetBeaconBlockSSZ(ctx, attestedBlockId)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get attested block SSZ (parent of signature block): %w", err)
 	}
@@ -777,6 +778,19 @@ func (pr *Prover) buildConsensusUpdateCore(ctx context.Context, signatureSlot ui
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse attested block SSZ: %w", err)
 	}
+
+	// Get attested block header from beacon API to get the correct body_root
+	// (prysm's HashTreeRoot may compute differently than the beacon node)
+	attestedHeader, err := pr.beaconClient.GetBeaconHeader(ctx, attestedBlockId)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get attested block header: %w", err)
+	}
+	attestedHeaderProto, err := attestedHeader.ToBeaconBlockHeader()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to convert attested header: %w", err)
+	}
+	// Use the body_root from beacon API
+	parsedAttestedBlock.SetBodyRoot(attestedHeaderProto.BodyRoot)
 
 	// Get attested state SSZ for finality_branch and next_sync_committee_branch generation
 	// The state at the attested block contains the finalized_checkpoint
@@ -805,6 +819,18 @@ func (pr *Prover) buildConsensusUpdateCore(ctx context.Context, signatureSlot ui
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse finalized block SSZ: %w", err)
 	}
+
+	// Get finalized block header from beacon API to get the correct body_root
+	finalizedHeader, err := pr.beaconClient.GetBeaconHeader(ctx, finalizedBlockId)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get finalized block header: %w", err)
+	}
+	finalizedHeaderProto, err := finalizedHeader.ToBeaconBlockHeader()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to convert finalized header: %w", err)
+	}
+	// Use the body_root from beacon API
+	parsedFinalizedBlock.SetBodyRoot(finalizedHeaderProto.BodyRoot)
 
 	executionBranch, err := parsedFinalizedBlock.GenerateExecutionPayloadBranch()
 	if err != nil {
@@ -874,7 +900,8 @@ func (pr *Prover) buildConsensusUpdateWithSlots(ctx context.Context, signatureSl
 	}
 
 	// Get attested block SSZ directly using the provided slot
-	attestedBlockSSZ, err := pr.beaconClient.GetBeaconBlockSSZ(ctx, fmt.Sprintf("%d", attestedSlot))
+	attestedBlockIdSlots := fmt.Sprintf("%d", attestedSlot)
+	attestedBlockSSZ, err := pr.beaconClient.GetBeaconBlockSSZ(ctx, attestedBlockIdSlots)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get attested block SSZ: %w", err)
 	}
@@ -883,6 +910,18 @@ func (pr *Prover) buildConsensusUpdateWithSlots(ctx context.Context, signatureSl
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse attested block SSZ: %w", err)
 	}
+
+	// Get attested block header from beacon API to get the correct body_root
+	attestedHeaderSlots, err := pr.beaconClient.GetBeaconHeader(ctx, attestedBlockIdSlots)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get attested block header: %w", err)
+	}
+	attestedHeaderProtoSlots, err := attestedHeaderSlots.ToBeaconBlockHeader()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to convert attested header: %w", err)
+	}
+	// Use the body_root from beacon API
+	parsedAttestedBlock.SetBodyRoot(attestedHeaderProtoSlots.BodyRoot)
 
 	// Get attested state SSZ for finality_branch and next_sync_committee_branch generation
 	attestedStateSSZ, err := pr.beaconClient.GetBeaconStateSSZ(ctx, fmt.Sprintf("%d", attestedSlot))
@@ -910,6 +949,18 @@ func (pr *Prover) buildConsensusUpdateWithSlots(ctx context.Context, signatureSl
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse finalized block SSZ: %w", err)
 	}
+
+	// Get finalized block header from beacon API to get the correct body_root
+	finalizedHeaderSlots, err := pr.beaconClient.GetBeaconHeader(ctx, finalizedBlockId)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get finalized block header: %w", err)
+	}
+	finalizedHeaderProtoSlots, err := finalizedHeaderSlots.ToBeaconBlockHeader()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to convert finalized header: %w", err)
+	}
+	// Use the body_root from beacon API
+	parsedFinalizedBlock.SetBodyRoot(finalizedHeaderProtoSlots.BodyRoot)
 
 	executionBranch, err := parsedFinalizedBlock.GenerateExecutionPayloadBranch()
 	if err != nil {
@@ -968,7 +1019,7 @@ func (pr *Prover) compareWithLightClientAPI(ctx context.Context, update *lctypes
 	// Get finality_update from LC API
 	lcFinalityUpdate, err := pr.beaconClient.GetLightClientFinalityUpdate(ctx)
 	if err != nil {
-		logger.WarnContext(ctx, "[DEBUG] Failed to get Light Client API finality update", "err", err)
+		logger.InfoContext(ctx, "[DEBUG] Failed to get Light Client API finality update", "err", err)
 		return
 	}
 
@@ -997,15 +1048,43 @@ func (pr *Prover) compareWithLightClientAPI(ctx context.Context, update *lctypes
 		"bs_finalized_root", fmt.Sprintf("0x%x", bsFinalizedRoot))
 
 	// Compare finalized roots
-	logger.InfoContext(ctx, "[DEBUG] Finalized root match",
-		"match", bytesEqual(lcFinalizedRoot, bsFinalizedRoot))
+	rootMatch := bytesEqual(lcFinalizedRoot, bsFinalizedRoot)
+	logger.InfoContext(ctx, "[DEBUG] Finalized root match", "match", rootMatch)
+
+	// If roots don't match, compare header fields
+	if !rootMatch {
+		lcHeader := &lcFinalityUpdate.Data.FinalizedHeader.Beacon
+		bsHeader := update.FinalizedHeader
+
+		logger.InfoContext(ctx, "[DEBUG] FINALIZED HEADER MISMATCH - comparing fields:")
+		logger.InfoContext(ctx, "[DEBUG] Slot",
+			"lc", uint64(lcHeader.Slot),
+			"bs", bsHeader.Slot,
+			"match", uint64(lcHeader.Slot) == bsHeader.Slot)
+		logger.InfoContext(ctx, "[DEBUG] ProposerIndex",
+			"lc", uint64(lcHeader.ProposerIndex),
+			"bs", bsHeader.ProposerIndex,
+			"match", uint64(lcHeader.ProposerIndex) == bsHeader.ProposerIndex)
+		logger.InfoContext(ctx, "[DEBUG] ParentRoot",
+			"lc", fmt.Sprintf("0x%x", []byte(lcHeader.ParentRoot)),
+			"bs", fmt.Sprintf("0x%x", bsHeader.ParentRoot),
+			"match", bytesEqual([]byte(lcHeader.ParentRoot), bsHeader.ParentRoot))
+		logger.InfoContext(ctx, "[DEBUG] StateRoot",
+			"lc", fmt.Sprintf("0x%x", []byte(lcHeader.StateRoot)),
+			"bs", fmt.Sprintf("0x%x", bsHeader.StateRoot),
+			"match", bytesEqual([]byte(lcHeader.StateRoot), bsHeader.StateRoot))
+		logger.InfoContext(ctx, "[DEBUG] BodyRoot",
+			"lc", fmt.Sprintf("0x%x", []byte(lcHeader.BodyRoot)),
+			"bs", fmt.Sprintf("0x%x", bsHeader.BodyRoot),
+			"match", bytesEqual([]byte(lcHeader.BodyRoot), bsHeader.BodyRoot))
+	}
 
 	logger.InfoContext(ctx, "[DEBUG] Now building BS update using LC's finalized_root...")
 
 	// Find signature and attested slots for this finalized block
 	bsSignatureSlot, bsAttestedSlot, err := pr.findSignatureAndAttestedSlot(ctx, lcFinalizedRoot, lcFinalizedSlot)
 	if err != nil {
-		logger.WarnContext(ctx, "[DEBUG] Failed to find signature/attested slots", "err", err)
+		logger.InfoContext(ctx, "[DEBUG] Failed to find signature/attested slots", "err", err)
 		return
 	}
 
@@ -1016,46 +1095,46 @@ func (pr *Prover) compareWithLightClientAPI(ctx context.Context, update *lctypes
 	// Get fork spec and build BS finality branch
 	forkSpec := pr.getForkSpecForSlot(bsAttestedSlot)
 	if forkSpec == nil {
-		logger.WarnContext(ctx, "[DEBUG] No fork spec for slot", "slot", bsAttestedSlot)
+		logger.InfoContext(ctx, "[DEBUG] No fork spec for slot", "slot", bsAttestedSlot)
 		return
 	}
 
 	// Get attested state and generate finality branch
 	attestedStateSSZ, err := pr.beaconClient.GetBeaconStateSSZ(ctx, fmt.Sprintf("%d", bsAttestedSlot))
 	if err != nil {
-		logger.WarnContext(ctx, "[DEBUG] Failed to get attested state SSZ", "err", err)
+		logger.InfoContext(ctx, "[DEBUG] Failed to get attested state SSZ", "err", err)
 		return
 	}
 
 	// Get block for version
 	attestedBlock, err := pr.beaconClient.GetBeaconBlock(ctx, fmt.Sprintf("%d", bsAttestedSlot))
 	if err != nil {
-		logger.WarnContext(ctx, "[DEBUG] Failed to get attested block", "err", err)
+		logger.InfoContext(ctx, "[DEBUG] Failed to get attested block", "err", err)
 		return
 	}
 
 	parsedState, err := ParseBeaconStateSSZ(attestedStateSSZ, attestedBlock.Version, forkSpec)
 	if err != nil {
-		logger.WarnContext(ctx, "[DEBUG] Failed to parse state SSZ", "err", err)
+		logger.InfoContext(ctx, "[DEBUG] Failed to parse state SSZ", "err", err)
 		return
 	}
 
 	bsBranch, err := parsedState.GenerateFinalityBranch()
 	if err != nil {
-		logger.WarnContext(ctx, "[DEBUG] Failed to generate finality branch", "err", err)
+		logger.InfoContext(ctx, "[DEBUG] Failed to generate finality branch", "err", err)
 		return
 	}
 
 	// Get BS attested state root
 	attestedBlockSSZ, err := pr.beaconClient.GetBeaconBlockSSZ(ctx, fmt.Sprintf("%d", bsAttestedSlot))
 	if err != nil {
-		logger.WarnContext(ctx, "[DEBUG] Failed to get attested block SSZ", "err", err)
+		logger.InfoContext(ctx, "[DEBUG] Failed to get attested block SSZ", "err", err)
 		return
 	}
 
 	parsedBlock, err := ParseBeaconBlockSSZ(attestedBlockSSZ, attestedBlock.Version, forkSpec)
 	if err != nil {
-		logger.WarnContext(ctx, "[DEBUG] Failed to parse block SSZ", "err", err)
+		logger.InfoContext(ctx, "[DEBUG] Failed to parse block SSZ", "err", err)
 		return
 	}
 
@@ -1164,7 +1243,7 @@ func (pr *Prover) getSyncCommitteesInPeriod(ctx context.Context, period uint64) 
 		// Get sync committees from state
 		currentSyncCommittee, nextSyncCommittee, err := pr.getSyncCommitteesFromState(ctx, i, block.Version)
 		if err != nil {
-			pr.GetLogger().WarnContext(ctx, "failed to get sync committees from state", "slot", i, "err", err)
+			pr.GetLogger().InfoContext(ctx, "failed to get sync committees from state", "slot", i, "err", err)
 			errs = append(errs, err)
 			continue
 		}

@@ -124,6 +124,16 @@ func (cl Client) GetBeaconBlock(ctx context.Context, blockId string) (*BeaconBlo
 	return &res, nil
 }
 
+// GetBeaconHeader retrieves a beacon block header by block_id (slot number, "head", "finalized", etc.)
+// The header includes body_root pre-computed by the beacon node
+func (cl Client) GetBeaconHeader(ctx context.Context, blockId string) (*BeaconHeaderResponse, error) {
+	var res BeaconHeaderResponse
+	if err := cl.get(ctx, fmt.Sprintf("/eth/v1/beacon/headers/%s", blockId), &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
 // GetBeaconBlockSSZ retrieves a beacon block in SSZ format
 func (cl Client) GetBeaconBlockSSZ(ctx context.Context, blockId string) ([]byte, error) {
 	return cl.getSSZ(ctx, fmt.Sprintf("/eth/v2/beacon/blocks/%s", blockId))

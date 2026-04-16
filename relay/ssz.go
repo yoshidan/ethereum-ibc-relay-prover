@@ -2,6 +2,7 @@ package relay
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 
@@ -301,6 +302,12 @@ type ParsedBeaconBlock struct {
 	version     string
 }
 
+// SetBodyRoot sets the body root from an external source (e.g., beacon API)
+// This is useful when the prysm-computed body root doesn't match the beacon node's
+func (p *ParsedBeaconBlock) SetBodyRoot(bodyRoot []byte) {
+	p.BodyRoot = bodyRoot
+}
+
 // GenerateExecutionPayloadBranch generates the Merkle proof for the execution_payload field in the block body
 func (p *ParsedBeaconBlock) GenerateExecutionPayloadBranch() ([][]byte, error) {
 	gindex := p.forkSpec.ExecutionPayloadGindex
@@ -404,12 +411,19 @@ func ParseBeaconBlockSSZ(data []byte, version string, forkSpec *lctypes.ForkSpec
 			return nil, fmt.Errorf("failed to convert execution payload to header: %w", err)
 		}
 		result.SyncAggregate = syncAggregateToProto(msg.Body.SyncAggregate)
-		// Compute body root using HashTreeRoot
-		bodyRoot, err := msg.Body.HashTreeRoot()
+		// Compute body root using manual computation with correct minimal preset values
+		// This bypasses prysm's HashTreeRoot which has issues with nested hasher state
+		bodyRoot, err := computeBodyRootElectra(msg.Body)
 		if err != nil {
 			return nil, fmt.Errorf("failed to compute body root: %w", err)
 		}
 		result.BodyRoot = bodyRoot[:]
+		// Compute execution root from full payload (not header) for branch verification
+		executionRoot, err := msg.Body.ExecutionPayload.HashTreeRoot()
+		if err != nil {
+			return nil, fmt.Errorf("failed to compute execution root: %w", err)
+		}
+		result.ExecutionRoot = executionRoot[:]
 	case "electra":
 		block := &ethpb.SignedBeaconBlockElectra{}
 		if err := block.UnmarshalSSZ(data); err != nil {
@@ -428,12 +442,19 @@ func ParseBeaconBlockSSZ(data []byte, version string, forkSpec *lctypes.ForkSpec
 			return nil, fmt.Errorf("failed to convert execution payload to header: %w", err)
 		}
 		result.SyncAggregate = syncAggregateToProto(msg.Body.SyncAggregate)
-		// Compute body root using HashTreeRoot
-		bodyRoot, err := msg.Body.HashTreeRoot()
+		// Compute body root using manual computation with correct minimal preset values
+		// This bypasses prysm's HashTreeRoot which has issues with nested hasher state
+		bodyRoot, err := computeBodyRootElectra(msg.Body)
 		if err != nil {
 			return nil, fmt.Errorf("failed to compute body root: %w", err)
 		}
 		result.BodyRoot = bodyRoot[:]
+		// Compute execution root from full payload (not header) for branch verification
+		executionRoot, err := msg.Body.ExecutionPayload.HashTreeRoot()
+		if err != nil {
+			return nil, fmt.Errorf("failed to compute execution root: %w", err)
+		}
+		result.ExecutionRoot = executionRoot[:]
 	case "deneb":
 		block := &ethpb.SignedBeaconBlockDeneb{}
 		if err := block.UnmarshalSSZ(data); err != nil {
@@ -458,16 +479,15 @@ func ParseBeaconBlockSSZ(data []byte, version string, forkSpec *lctypes.ForkSpec
 			return nil, fmt.Errorf("failed to compute body root: %w", err)
 		}
 		result.BodyRoot = bodyRoot[:]
+		// Compute execution root from full payload (not header) for branch verification
+		executionRoot, err := msg.Body.ExecutionPayload.HashTreeRoot()
+		if err != nil {
+			return nil, fmt.Errorf("failed to compute execution root: %w", err)
+		}
+		result.ExecutionRoot = executionRoot[:]
 	default:
 		return nil, fmt.Errorf("unsupported version: %s", version)
 	}
-
-	// Compute execution root
-	executionRoot, err := result.ExecutionPayload.HashTreeRoot()
-	if err != nil {
-		return nil, fmt.Errorf("failed to compute execution root: %w", err)
-	}
-	result.ExecutionRoot = executionRoot[:]
 
 	return result, nil
 }
@@ -1449,6 +1469,59 @@ func getBeaconBlockBodyElectraFieldHashes(body *ethpb.BeaconBlockBodyElectra) ([
 	}
 
 	return fieldHashes, nil
+}
+
+// computeBodyRootElectra computes the body root for BeaconBlockBodyElectra using correct minimal preset values
+// This bypasses prysm's HashTreeRoot which has issues with nested hasher state
+func computeBodyRootElectra(body *ethpb.BeaconBlockBodyElectra) ([32]byte, error) {
+	fieldHashes, err := getBeaconBlockBodyElectraFieldHashes(body)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	root, err := computeMerkleRoot(fieldHashes)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	var result [32]byte
+	copy(result[:], root)
+	return result, nil
+}
+
+// computeMerkleRoot computes the merkle root of a list of leaf hashes
+func computeMerkleRoot(leaves [][]byte) ([]byte, error) {
+	if len(leaves) == 0 {
+		return make([]byte, 32), nil
+	}
+
+	// Pad to power of 2
+	numLeaves := len(leaves)
+	var nearestPowerOf2 int = 1
+	for nearestPowerOf2 < numLeaves {
+		nearestPowerOf2 *= 2
+	}
+
+	paddedLeaves := make([][]byte, nearestPowerOf2)
+	for i := 0; i < nearestPowerOf2; i++ {
+		if i < numLeaves {
+			paddedLeaves[i] = leaves[i]
+		} else {
+			paddedLeaves[i] = make([]byte, 32)
+		}
+	}
+
+	// Build merkle tree
+	for len(paddedLeaves) > 1 {
+		newLeaves := make([][]byte, len(paddedLeaves)/2)
+		for i := 0; i < len(paddedLeaves); i += 2 {
+			h := sha256.New()
+			h.Write(paddedLeaves[i])
+			h.Write(paddedLeaves[i+1])
+			newLeaves[i/2] = h.Sum(nil)
+		}
+		paddedLeaves = newLeaves
+	}
+
+	return paddedLeaves[0], nil
 }
 
 // getBeaconBlockBodyDenebFieldHashes computes field hashes for BeaconBlockBodyDeneb

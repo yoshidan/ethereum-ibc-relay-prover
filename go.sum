@@ -1178,8 +1178,8 @@ github.com/xiang90/probing v0.0.0-20190116061207-43a291ad63a2/go.mod h1:UETIi67q
 github.com/xordataexchange/crypt v0.0.3-0.20170626215501-b2862e3d0a77/go.mod h1:aYKd//L2LvnjZzWKhF00oedf4jCCReLcmhLdhm1A27Q=
 github.com/xrash/smetrics v0.0.0-20240521201337-686a1a2994c1 h1:gEOO8jv9F4OT7lGCjxCBTO/36wtF6j2nSip77qHd4x4=
 github.com/xrash/smetrics v0.0.0-20240521201337-686a1a2994c1/go.mod h1:Ohn+xnUBiLI6FVj/9LpzZWtj1/D6lUovWYBkxHVV3aM=
-github.com/yoshidan/prysm/v7 v7.1.3-p2 h1:cjoPDcULTeIj9hVfL/61csIaMmaOlSZFZx54GoRU+X4=
-github.com/yoshidan/prysm/v7 v7.1.3-p2/go.mod h1:rL/JJM+o8qPRGpjGbe9KaSnrw1QxCjb1s9Wl2n6ExE0=
+github.com/yoshidan/prysm/v7 v7.1.3-p3 h1:3AG1L44zJFw+ux0WdevvkxUuO85wOcs7Om92u7EsPLI=
+github.com/yoshidan/prysm/v7 v7.1.3-p3/go.mod h1:rL/JJM+o8qPRGpjGbe9KaSnrw1QxCjb1s9Wl2n6ExE0=
 github.com/yuin/goldmark v1.1.25/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
 github.com/yuin/goldmark v1.1.27/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
 github.com/yuin/goldmark v1.1.32/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=

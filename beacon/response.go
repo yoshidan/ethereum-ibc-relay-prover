@@ -199,3 +199,40 @@ type SyncCommitteesDataJSON struct {
 	Validators          []string   `json:"validators"`
 	ValidatorAggregates [][]string `json:"validator_aggregates"`
 }
+
+// BeaconHeaderResponse is the response from GET /eth/v1/beacon/headers/{block_id}
+type BeaconHeaderResponse struct {
+	ExecutionOptimistic bool                 `json:"execution_optimistic"`
+	Finalized           bool                 `json:"finalized"`
+	Data                BeaconHeaderDataJSON `json:"data"`
+}
+
+type BeaconHeaderDataJSON struct {
+	Root      hexutil.Bytes             `json:"root"`
+	Canonical bool                      `json:"canonical"`
+	Header    SignedBeaconBlockHeaderJSON `json:"header"`
+}
+
+type SignedBeaconBlockHeaderJSON struct {
+	Message   beaconBlockHeaderJSON `json:"message"`
+	Signature hexutil.Bytes         `json:"signature"`
+}
+
+// ToBeaconBlockHeader converts the response to BeaconBlockHeader
+func (r *BeaconHeaderResponse) ToBeaconBlockHeader() (*BeaconBlockHeader, error) {
+	slot, err := strconv.Atoi(r.Data.Header.Message.Slot)
+	if err != nil {
+		return nil, err
+	}
+	proposerIndex, err := strconv.Atoi(r.Data.Header.Message.ProposerIndex)
+	if err != nil {
+		return nil, err
+	}
+	return &BeaconBlockHeader{
+		Slot:          primitives.Slot(slot),
+		ProposerIndex: primitives.ValidatorIndex(proposerIndex),
+		ParentRoot:    r.Data.Header.Message.ParentRoot,
+		StateRoot:     r.Data.Header.Message.StateRoot,
+		BodyRoot:      r.Data.Header.Message.BodyRoot,
+	}, nil
+}
