@@ -16,7 +16,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/hyperledger-labs/yui-relayer/core"
 	"github.com/hyperledger-labs/yui-relayer/log"
-	fastssz "github.com/prysmaticlabs/fastssz"
 )
 
 var IBCCommitmentsSlot = common.HexToHash("1ee222554989dda120e26ecacf756fe1235cd8d726706b57517715dde4f0c900")
@@ -189,7 +188,7 @@ func (pr *Prover) SetupHeadersForUpdate(ctx context.Context, counterparty core.F
 		return nil, fmt.Errorf("failed to get sync committees in period: state_period=%v %v", statePeriod, err)
 	}
 	for p := statePeriod + 1; p <= latestPeriod; p++ {
-		header, err := pr.buildNextSyncCommitteeUpdate(ctx, p, trustedHeight, trustedNextSyncCommittee)
+		header, err := pr.buildNextSyncCommitteeUpdate(ctx, p, trustedHeight, trustedNextSyncCommittee, p == latestPeriod)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build next sync committee update for next: period=%v trusted_height=%v %v", p, trustedHeight, err)
 		}
@@ -392,9 +391,9 @@ func (pr *Prover) getBootstrapInPeriod(ctx context.Context, period uint64) (*lct
 	return currentSyncCommittee, nil
 }
 
-func (pr *Prover) buildNextSyncCommitteeUpdate(ctx context.Context, period uint64, trustedHeight clienttypes.Height, trustedNextSyncCommittee *lctypes.SyncCommittee) (*lctypes.Header, error) {
+func (pr *Prover) buildNextSyncCommitteeUpdate(ctx context.Context, period uint64, trustedHeight clienttypes.Height, trustedNextSyncCommittee *lctypes.SyncCommittee, isLatestPeriod bool) (*lctypes.Header, error) {
 	// Build consensus update with next_sync_committee using standard Beacon API
-	lcUpdate, executionHeader, err := pr.buildConsensusUpdateForPeriod(ctx, period)
+	lcUpdate, executionHeader, err := pr.buildConsensusUpdateForPeriod(ctx, period, isLatestPeriod)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build consensus update for period %d: %w", period, err)
 	}
@@ -459,171 +458,43 @@ func (pr *Prover) getForkSpecForSlot(slot uint64) *lctypes.ForkSpec {
 	return spec
 }
 
-// findSignatureAndAttestedSlot finds the earliest signature slot and attested slot for a given finalized block.
-// According to the Ethereum Light Client spec:
-// - attested_block: The first block after finalized_block whose state has finalized_checkpoint.root == hash(finalized_block)
-// - signature_block: The child of attested_block (contains sync_aggregate signing attested_block)
-// Returns (signatureSlot, attestedSlot, error)
-func (pr *Prover) findSignatureAndAttestedSlot(ctx context.Context, finalizedBlockRoot []byte, finalizedSlot uint64) (signatureSlot uint64, attestedSlot uint64, err error) {
-	// Search for the earliest attested block after finalized_slot
-	// The attested block's state must have finalized_checkpoint.root == finalizedBlockRoot
-	slotsPerEpoch := pr.slotsPerEpoch()
-	maxSearchSlots := slotsPerEpoch * 2 // Search up to 2 epochs
-
-	// Log search parameters for debugging
-	pr.GetLogger().DebugContext(ctx, "searching for signature and attested slots",
-		"finalized_slot", finalizedSlot,
-		"finalized_block_root", fmt.Sprintf("0x%x", finalizedBlockRoot),
-		"slots_per_epoch", slotsPerEpoch,
-		"max_search_slots", maxSearchSlots)
-
-	var attestedBlockRootHex string
-
-	for offset := uint64(1); offset <= maxSearchSlots; offset++ {
-		candidateSlot := finalizedSlot + offset
-
-		// Check if a block exists at this slot
-		_, err := pr.beaconClient.GetBeaconBlock(ctx, fmt.Sprintf("%d", candidateSlot))
-		if err != nil {
-			// No block at this slot (skipped), continue
-			continue
-		}
-
-		// Check if this block's state has finalized_checkpoint matching our finalized block
-		checkpoints, err := pr.beaconClient.GetFinalityCheckpointsAtState(ctx, fmt.Sprintf("%d", candidateSlot))
-		if err != nil {
-			pr.GetLogger().DebugContext(ctx, "failed to get finality checkpoints", "slot", candidateSlot, "err", err)
-			continue
-		}
-
-		// Compare finalized checkpoint root with our finalized block root
-		checkpointRoot := checkpoints.Finalized.Root[:]
-		if bytesEqual(checkpointRoot, finalizedBlockRoot) {
-			// Found the attested block
-			attestedSlot = candidateSlot
-
-			// Get the block root for the attested block
-			blockRootRes, err := pr.beaconClient.GetBlockRootByID(ctx, fmt.Sprintf("%d", candidateSlot), true)
-			if err != nil {
-				return 0, 0, fmt.Errorf("failed to get block root for attested slot %d: %w", candidateSlot, err)
-			}
-			attestedBlockRootHex = blockRootRes.Data.Root.String()
-
-			pr.GetLogger().DebugContext(ctx, "found attested block",
-				"attested_slot", attestedSlot,
-				"attested_block_root", attestedBlockRootHex,
-				"finalized_checkpoint_root", fmt.Sprintf("0x%x", checkpointRoot))
-			break
-		}
-	}
-
-	if attestedSlot == 0 {
-		return 0, 0, fmt.Errorf("attested block not found within %d slots after finalized slot %d", maxSearchSlots, finalizedSlot)
-	}
-
-	// Now find the signature block (the child of attested block)
-	// The signature block's parent_root must equal the attested block's root
-	// Wait for the chain to advance if necessary
-	requiredSlot := attestedSlot + slotsPerEpoch
-	maxWaitAttempts := 30 // Max ~3 minutes with 6 second intervals
-
-	for attempt := 0; attempt < maxWaitAttempts; attempt++ {
-		// Check current head slot
-		headBlock, err := pr.beaconClient.GetBeaconBlock(ctx, "head")
-		if err != nil {
-			return 0, 0, fmt.Errorf("failed to get head block: %w", err)
-		}
-		headSlot := uint64(headBlock.Data.Message.Slot)
-
-		pr.GetLogger().DebugContext(ctx, "checking chain progress",
-			"head_slot", headSlot,
-			"attested_slot", attestedSlot,
-			"required_slot", requiredSlot,
-			"attempt", attempt)
-
-		// Search for signature block in available slots
-		for offset := uint64(1); offset <= slotsPerEpoch; offset++ {
-			candidateSlot := attestedSlot + offset
-
-			// Don't search beyond head slot
-			if candidateSlot > headSlot {
-				break
-			}
-
-			block, err := pr.beaconClient.GetBeaconBlock(ctx, fmt.Sprintf("%d", candidateSlot))
-			if err != nil {
-				// No block at this slot, continue
-				continue
-			}
-
-			// Check if this block's parent is the attested block
-			parentRootHex := block.Data.Message.ParentRoot.String()
-			if parentRootHex == attestedBlockRootHex {
-				signatureSlot = candidateSlot
-				pr.GetLogger().DebugContext(ctx, "found signature block",
-					"signature_slot", signatureSlot,
-					"attested_slot", attestedSlot,
-					"parent_root", parentRootHex)
-				return signatureSlot, attestedSlot, nil
-			}
-		}
-
-		// If head slot is beyond our search range and we still haven't found the signature block,
-		// it means the attested block is not on the canonical chain (shouldn't happen normally)
-		if headSlot >= requiredSlot {
-			return 0, 0, fmt.Errorf("signature block not found within %d slots after attested slot %d (head: %d, expected parent: %s)", slotsPerEpoch, attestedSlot, headSlot, attestedBlockRootHex)
-		}
-
-		// Wait for more blocks to be produced
-		pr.GetLogger().DebugContext(ctx, "waiting for chain to advance",
-			"head_slot", headSlot,
-			"required_slot", requiredSlot)
-		time.Sleep(time.Duration(pr.secondsPerSlot()) * time.Second)
-	}
-
-	return 0, 0, fmt.Errorf("timeout waiting for signature block after attested slot %d", attestedSlot)
-}
-
-// bytesEqual compares two byte slices for equality
-func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 // buildConsensusUpdateFromBeaconAPI builds ConsensusUpdate using standard Beacon API
+// Following SPEC.md design:
+//
+//	SignatureBlock (head) → parent_root → AttestedBlock
+//	AttestedState → finalized_checkpoint.root → FinalizedBlock
+//	AttestedState → next_sync_committee
 func (pr *Prover) buildConsensusUpdateFromBeaconAPI(ctx context.Context, includeNextSyncCommittee bool) (*lctypes.ConsensusUpdate, *beacon.ExecutionPayloadHeader, error) {
-	// 1. Get finalized block
-	finalizedBlock, err := pr.beaconClient.GetBeaconBlock(ctx, "finalized")
+	// 1. Get head block as SignatureBlock candidate
+	headBlock, err := pr.beaconClient.GetBeaconBlock(ctx, "head")
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get finalized block: %w", err)
+		return nil, nil, fmt.Errorf("failed to get head block: %w", err)
 	}
-	finalizedSlot := uint64(finalizedBlock.Data.Message.Slot)
-	pr.GetLogger().DebugContext(ctx, "got finalized block", "slot", finalizedSlot, "version", finalizedBlock.Version)
+	signatureSlot := uint64(headBlock.Data.Message.Slot)
 
-	// 2. Get finalized block root
-	finalizedBlockRoot, err := pr.beaconClient.GetBlockRootByID(ctx, "finalized", true)
+	// 2. Get AttestedBlock (parent of SignatureBlock)
+	attestedBlockRoot := headBlock.Data.Message.ParentRoot.String()
+	attestedBlock, err := pr.beaconClient.GetBeaconBlock(ctx, attestedBlockRoot)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get finalized block root: %w", err)
+		return nil, nil, fmt.Errorf("failed to get attested block: %w", err)
 	}
-	pr.GetLogger().DebugContext(ctx, "finalized block root", "root", finalizedBlockRoot.Data.Root.String())
+	attestedSlot := uint64(attestedBlock.Data.Message.Slot)
 
-	// 3. Find signature and attested slots
-	// These are blocks AFTER finalized that can prove the finalized block is finalized
-	signatureSlot, attestedSlot, err := pr.findSignatureAndAttestedSlot(ctx, finalizedBlockRoot.Data.Root, finalizedSlot)
+	// 3. Get FinalizedBlock from AttestedState.finalized_checkpoint.root
+	checkpoints, err := pr.beaconClient.GetFinalityCheckpointsAtState(ctx, fmt.Sprintf("%d", attestedSlot))
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to find signature and attested slots: %w", err)
+		return nil, nil, fmt.Errorf("failed to get finality checkpoints at attested slot %d: %w", attestedSlot, err)
 	}
+	finalizedBlockRoot := fmt.Sprintf("0x%x", checkpoints.Finalized.Root[:])
 
-	// 4. Build consensus update using the SPECIFIC finalized block root (not "finalized" tag which may change)
-	finalizedBlockId := finalizedBlockRoot.Data.Root.String()
-	return pr.buildConsensusUpdateWithSlots(ctx, signatureSlot, attestedSlot, finalizedBlockId, finalizedBlock.Version, includeNextSyncCommittee)
+	pr.GetLogger().DebugContext(ctx, "building consensus update from beacon API",
+		"signature_slot", signatureSlot,
+		"attested_slot", attestedSlot,
+		"finalized_checkpoint_root", finalizedBlockRoot,
+		"finalized_checkpoint_epoch", checkpoints.Finalized.Epoch)
+
+	// 4. Build consensus update
+	return pr.buildConsensusUpdateWithSlots(ctx, signatureSlot, attestedSlot, finalizedBlockRoot, headBlock.Version, includeNextSyncCommittee)
 }
 
 // getSyncCommitteesFromState retrieves current and next sync committees from beacon state
@@ -647,109 +518,76 @@ func (pr *Prover) getSyncCommitteesFromState(ctx context.Context, slot uint64, v
 }
 
 // buildConsensusUpdateForPeriod builds a ConsensusUpdate for a specific period with next_sync_committee
-func (pr *Prover) buildConsensusUpdateForPeriod(ctx context.Context, period uint64) (*lctypes.ConsensusUpdate, *beacon.ExecutionPayloadHeader, error) {
-	// Get finalized block to determine current state
-	finalizedBlock, err := pr.beaconClient.GetBeaconBlock(ctx, "finalized")
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get finalized block: %w", err)
-	}
-	currentFinalizedSlot := uint64(finalizedBlock.Data.Message.Slot)
-	currentFinalizedPeriod := pr.computeSyncCommitteePeriod(pr.computeEpoch(currentFinalizedSlot))
-
-	pr.GetLogger().DebugContext(ctx, "building consensus update for period",
-		"target_period", period,
-		"current_finalized_slot", currentFinalizedSlot,
-		"current_finalized_period", currentFinalizedPeriod)
-
-	// For period updates, we need to find a state where:
-	// 1. The attested block is from the target period (so we can prove next_sync_committee)
-	// 2. The finalized block should be as recent as possible (ideally from target period or later)
-	//
-	// Strategy: Search backwards from the end of period+1 to find a state where
-	// finalized_checkpoint points to a block in the target period
-
+// Following SPEC.md design:
+//
+//	SignatureBlock (signatureSlot) → parent_root → AttestedBlock
+//	AttestedState → finalized_checkpoint.root → FinalizedBlock
+//	AttestedState → next_sync_committee (period+1's committee)
+func (pr *Prover) buildConsensusUpdateForPeriod(ctx context.Context, period uint64, isLatestPeriod bool) (*lctypes.ConsensusUpdate, *beacon.ExecutionPayloadHeader, error) {
 	periodStartSlot := pr.getPeriodBoundarySlot(period)
 	periodEndSlot := pr.getPeriodBoundarySlot(period+1) - 1
 
-	// Search from the end of the next period backwards
-	searchEndSlot := pr.getPeriodBoundarySlot(period + 2)
-	if searchEndSlot > currentFinalizedSlot+pr.slotsPerEpoch() {
-		searchEndSlot = currentFinalizedSlot + pr.slotsPerEpoch()
+	pr.GetLogger().DebugContext(ctx, "building consensus update for period",
+		"target_period", period,
+		"is_latest_period", isLatestPeriod,
+		"period_start_slot", periodStartSlot,
+		"period_end_slot", periodEndSlot)
+
+	// Determine search end slot
+	// For latest period, cap to current finalized slot
+	// For past periods, use period end slot (all slots are already finalized)
+	searchEndSlot := periodEndSlot
+	if isLatestPeriod {
+		finalizedBlock, err := pr.beaconClient.GetBeaconBlock(ctx, "finalized")
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to get finalized block: %w", err)
+		}
+		currentFinalizedSlot := uint64(finalizedBlock.Data.Message.Slot)
+		if searchEndSlot > currentFinalizedSlot {
+			searchEndSlot = currentFinalizedSlot
+		}
+		pr.GetLogger().DebugContext(ctx, "latest period: capped search range",
+			"current_finalized_slot", currentFinalizedSlot,
+			"search_end_slot", searchEndSlot)
 	}
 
-	var bestFinalizedRoot []byte
-	var bestFinalizedSlot uint64
-	var bestVersion string
-
-	// Search for a state that has finalized a block within the target period
-	for searchSlot := searchEndSlot; searchSlot > periodEndSlot; searchSlot-- {
-		block, err := pr.beaconClient.GetBeaconBlock(ctx, fmt.Sprintf("%d", searchSlot))
+	// Search backwards within target period: searchSlot = signatureSlot
+	// SignatureBlock.parent_root → AttestedBlock (attestedSlot = signatureSlot - 1 or earlier)
+	// AttestedState must be in target period to get correct next_sync_committee
+	for signatureSlot := searchEndSlot; signatureSlot > periodStartSlot; signatureSlot-- {
+		// Get signature block
+		signatureBlock, err := pr.beaconClient.GetBeaconBlock(ctx, fmt.Sprintf("%d", signatureSlot))
 		if err != nil {
 			continue
 		}
 
-		checkpoints, err := pr.beaconClient.GetFinalityCheckpointsAtState(ctx, fmt.Sprintf("%d", searchSlot))
+		// Get attested block (parent of signature block)
+		attestedBlockRoot := signatureBlock.Data.Message.ParentRoot.String()
+		attestedBlock, err := pr.beaconClient.GetBeaconBlock(ctx, attestedBlockRoot)
+		if err != nil {
+			continue
+		}
+		attestedSlot := uint64(attestedBlock.Data.Message.Slot)
+
+		// Get finalized checkpoint from attested state
+		checkpoints, err := pr.beaconClient.GetFinalityCheckpointsAtState(ctx, fmt.Sprintf("%d", attestedSlot))
 		if err != nil {
 			continue
 		}
 
-		// Check if the finalized checkpoint is in the target period or later
-		finalizedEpoch := checkpoints.Finalized.Epoch
-		finalizedPeriod := pr.computeSyncCommitteePeriod(finalizedEpoch)
+		finalizedBlockRoot := fmt.Sprintf("0x%x", checkpoints.Finalized.Root[:])
 
-		if finalizedPeriod >= period {
-			// Get the actual finalized slot
-			finalizedBlockId := fmt.Sprintf("0x%x", checkpoints.Finalized.Root[:])
-			finalizedBlockData, err := pr.beaconClient.GetBeaconBlock(ctx, finalizedBlockId)
-			if err != nil {
-				continue
-			}
-			finalizedSlotCandidate := uint64(finalizedBlockData.Data.Message.Slot)
+		pr.GetLogger().DebugContext(ctx, "found valid signature/attested slots",
+			"signature_slot", signatureSlot,
+			"attested_slot", attestedSlot,
+			"finalized_checkpoint_root", finalizedBlockRoot,
+			"finalized_checkpoint_epoch", checkpoints.Finalized.Epoch)
 
-			// Check if this is better than what we have
-			if bestFinalizedSlot == 0 || finalizedSlotCandidate > bestFinalizedSlot {
-				bestFinalizedRoot = checkpoints.Finalized.Root[:]
-				bestFinalizedSlot = finalizedSlotCandidate
-				bestVersion = block.Version
-
-				pr.GetLogger().DebugContext(ctx, "found candidate finalized block",
-					"search_slot", searchSlot,
-					"finalized_slot", finalizedSlotCandidate,
-					"finalized_epoch", finalizedEpoch,
-					"finalized_period", finalizedPeriod)
-
-				// If finalized slot is in the target period, we found a good one
-				if finalizedSlotCandidate >= periodStartSlot && finalizedSlotCandidate <= periodEndSlot {
-					break
-				}
-			}
-		}
+		// Build consensus update
+		return pr.buildConsensusUpdateWithSlots(ctx, signatureSlot, attestedSlot, finalizedBlockRoot, signatureBlock.Version, true)
 	}
 
-	if bestFinalizedRoot == nil {
-		return nil, nil, fmt.Errorf("could not find suitable finalized block for period %d", period)
-	}
-
-	pr.GetLogger().DebugContext(ctx, "using finalized block for period",
-		"period", period,
-		"finalized_slot", bestFinalizedSlot,
-		"finalized_epoch", pr.computeEpoch(bestFinalizedSlot))
-
-	// Find signature and attested slots using the selected finalized block
-	signatureSlot, attestedSlot, err := pr.findSignatureAndAttestedSlot(ctx, bestFinalizedRoot, bestFinalizedSlot)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to find signature and attested slots: %w", err)
-	}
-
-	pr.GetLogger().DebugContext(ctx, "found signature and attested slots",
-		"signature_slot", signatureSlot,
-		"attested_slot", attestedSlot,
-		"finalized_slot", bestFinalizedSlot,
-		"finalized_root", fmt.Sprintf("0x%x", bestFinalizedRoot))
-
-	// Build consensus update using the explicit slots
-	finalizedBlockId := fmt.Sprintf("0x%x", bestFinalizedRoot)
-	return pr.buildConsensusUpdateWithSlots(ctx, signatureSlot, attestedSlot, finalizedBlockId, bestVersion, true)
+	return nil, nil, fmt.Errorf("could not find valid signature slot in period %d (searched %d to %d)", period, searchEndSlot, periodStartSlot)
 }
 
 // buildConsensusUpdateCore is the common implementation for building ConsensusUpdate
@@ -1048,222 +886,7 @@ func (pr *Prover) buildConsensusUpdateWithSlots(ctx context.Context, signatureSl
 			"value", fmt.Sprintf("0x%x", b))
 	}
 
-	// Debug: Compare with Light Client API
-	pr.compareWithLightClientAPI(ctx, update, attestedSlot)
-
 	return update, parsedFinalizedBlock.ExecutionPayload, nil
-}
-
-// compareWithLightClientAPI compares BeaconState-generated values with Light Client API values
-// Uses the SAME finalized slot from LC API to ensure fair comparison
-func (pr *Prover) compareWithLightClientAPI(ctx context.Context, update *lctypes.ConsensusUpdate, attestedSlot uint64) {
-	logger := pr.GetLogger()
-
-	// Get finality_update from LC API
-	lcFinalityUpdate, err := pr.beaconClient.GetLightClientFinalityUpdate(ctx)
-	if err != nil {
-		logger.InfoContext(ctx, "[DEBUG] Failed to get Light Client API finality update", "err", err)
-		return
-	}
-
-	lcAttestedSlot := uint64(lcFinalityUpdate.Data.AttestedHeader.Beacon.Slot)
-	lcFinalizedSlot := uint64(lcFinalityUpdate.Data.FinalizedHeader.Beacon.Slot)
-	lcSignatureSlot := uint64(lcFinalityUpdate.Data.SignatureSlot)
-
-	// Compute LC finalized_root (hash_tree_root of finalized_header)
-	lcFinalizedRoot := computeBeaconBlockHeaderRootFromLC(&lcFinalityUpdate.Data.FinalizedHeader.Beacon)
-
-	logger.InfoContext(ctx, "[DEBUG] ===== CONSENSUS UPDATE COMPARISON =====")
-	logger.InfoContext(ctx, "[DEBUG] LC API finality_update",
-		"lc_attested_slot", lcAttestedSlot,
-		"lc_finalized_slot", lcFinalizedSlot,
-		"lc_signature_slot", lcSignatureSlot,
-		"lc_finalized_root", fmt.Sprintf("0x%x", lcFinalizedRoot))
-
-	// Also log BS update info
-	bsAttestedSlot := update.AttestedHeader.Slot
-	bsFinalizedSlot := update.FinalizedHeader.Slot
-	bsFinalizedRoot := computeBeaconBlockHeaderRootFromUpdate(update.FinalizedHeader)
-
-	logger.InfoContext(ctx, "[DEBUG] BS ConsensusUpdate (actual)",
-		"bs_attested_slot", bsAttestedSlot,
-		"bs_finalized_slot", bsFinalizedSlot,
-		"bs_finalized_root", fmt.Sprintf("0x%x", bsFinalizedRoot))
-
-	// Compare finalized roots
-	rootMatch := bytesEqual(lcFinalizedRoot, bsFinalizedRoot)
-	logger.InfoContext(ctx, "[DEBUG] Finalized root match", "match", rootMatch)
-
-	// If roots don't match, compare header fields
-	if !rootMatch {
-		lcHeader := &lcFinalityUpdate.Data.FinalizedHeader.Beacon
-		bsHeader := update.FinalizedHeader
-
-		logger.InfoContext(ctx, "[DEBUG] FINALIZED HEADER MISMATCH - comparing fields:")
-		logger.InfoContext(ctx, "[DEBUG] Slot",
-			"lc", uint64(lcHeader.Slot),
-			"bs", bsHeader.Slot,
-			"match", uint64(lcHeader.Slot) == bsHeader.Slot)
-		logger.InfoContext(ctx, "[DEBUG] ProposerIndex",
-			"lc", uint64(lcHeader.ProposerIndex),
-			"bs", bsHeader.ProposerIndex,
-			"match", uint64(lcHeader.ProposerIndex) == bsHeader.ProposerIndex)
-		logger.InfoContext(ctx, "[DEBUG] ParentRoot",
-			"lc", fmt.Sprintf("0x%x", []byte(lcHeader.ParentRoot)),
-			"bs", fmt.Sprintf("0x%x", bsHeader.ParentRoot),
-			"match", bytesEqual([]byte(lcHeader.ParentRoot), bsHeader.ParentRoot))
-		logger.InfoContext(ctx, "[DEBUG] StateRoot",
-			"lc", fmt.Sprintf("0x%x", []byte(lcHeader.StateRoot)),
-			"bs", fmt.Sprintf("0x%x", bsHeader.StateRoot),
-			"match", bytesEqual([]byte(lcHeader.StateRoot), bsHeader.StateRoot))
-		logger.InfoContext(ctx, "[DEBUG] BodyRoot",
-			"lc", fmt.Sprintf("0x%x", []byte(lcHeader.BodyRoot)),
-			"bs", fmt.Sprintf("0x%x", bsHeader.BodyRoot),
-			"match", bytesEqual([]byte(lcHeader.BodyRoot), bsHeader.BodyRoot))
-	}
-
-	logger.InfoContext(ctx, "[DEBUG] Now building BS update using LC's finalized_root...")
-
-	// Find signature and attested slots for this finalized block
-	bsSignatureSlot, bsAttestedSlot, err := pr.findSignatureAndAttestedSlot(ctx, lcFinalizedRoot, lcFinalizedSlot)
-	if err != nil {
-		logger.InfoContext(ctx, "[DEBUG] Failed to find signature/attested slots", "err", err)
-		return
-	}
-
-	logger.InfoContext(ctx, "[DEBUG] BS computed slots",
-		"bs_attested_slot", bsAttestedSlot,
-		"bs_signature_slot", bsSignatureSlot)
-
-	// Get fork spec and build BS finality branch
-	forkSpec := pr.getForkSpecForSlot(bsAttestedSlot)
-	if forkSpec == nil {
-		logger.InfoContext(ctx, "[DEBUG] No fork spec for slot", "slot", bsAttestedSlot)
-		return
-	}
-
-	// Get attested state and generate finality branch
-	attestedStateSSZ, err := pr.beaconClient.GetBeaconStateSSZ(ctx, fmt.Sprintf("%d", bsAttestedSlot))
-	if err != nil {
-		logger.InfoContext(ctx, "[DEBUG] Failed to get attested state SSZ", "err", err)
-		return
-	}
-
-	// Get block for version
-	attestedBlock, err := pr.beaconClient.GetBeaconBlock(ctx, fmt.Sprintf("%d", bsAttestedSlot))
-	if err != nil {
-		logger.InfoContext(ctx, "[DEBUG] Failed to get attested block", "err", err)
-		return
-	}
-
-	parsedState, err := ParseBeaconStateSSZ(attestedStateSSZ, attestedBlock.Version, forkSpec)
-	if err != nil {
-		logger.InfoContext(ctx, "[DEBUG] Failed to parse state SSZ", "err", err)
-		return
-	}
-
-	bsBranch, err := parsedState.GenerateFinalityBranch()
-	if err != nil {
-		logger.InfoContext(ctx, "[DEBUG] Failed to generate finality branch", "err", err)
-		return
-	}
-
-	// Get BS attested state root
-	attestedBlockSSZ, err := pr.beaconClient.GetBeaconBlockSSZ(ctx, fmt.Sprintf("%d", bsAttestedSlot))
-	if err != nil {
-		logger.InfoContext(ctx, "[DEBUG] Failed to get attested block SSZ", "err", err)
-		return
-	}
-
-	parsedBlock, err := ParseBeaconBlockSSZ(attestedBlockSSZ, attestedBlock.Version, forkSpec)
-	if err != nil {
-		logger.InfoContext(ctx, "[DEBUG] Failed to parse block SSZ", "err", err)
-		return
-	}
-
-	// Now compare
-	logger.InfoContext(ctx, "[DEBUG] Comparison (same finalized_slot):")
-	logger.InfoContext(ctx, "[DEBUG] Attested slots",
-		"lc", lcAttestedSlot,
-		"bs", bsAttestedSlot,
-		"match", lcAttestedSlot == bsAttestedSlot)
-
-	lcStateRoot := []byte(lcFinalityUpdate.Data.AttestedHeader.Beacon.StateRoot)
-	bsStateRoot := parsedBlock.StateRoot
-	logger.InfoContext(ctx, "[DEBUG] Attested StateRoot",
-		"lc", fmt.Sprintf("0x%x", lcStateRoot),
-		"bs", fmt.Sprintf("0x%x", bsStateRoot),
-		"match", bytesEqual(lcStateRoot, bsStateRoot))
-
-	// Compare finality branch
-	logger.InfoContext(ctx, "[DEBUG] Finality Branch comparison:")
-	lcBranch := lcFinalityUpdate.Data.FinalityBranch
-	logger.InfoContext(ctx, "[DEBUG] Branch lengths", "lc_len", len(lcBranch), "bs_len", len(bsBranch))
-
-	allMatch := true
-	minLen := len(lcBranch)
-	if len(bsBranch) < minLen {
-		minLen = len(bsBranch)
-	}
-	for i := 0; i < minLen; i++ {
-		lcVal := []byte(lcBranch[i])
-		bsVal := bsBranch[i]
-		match := bytesEqual(lcVal, bsVal)
-		if !match {
-			allMatch = false
-		}
-		logger.InfoContext(ctx, fmt.Sprintf("[DEBUG] Branch[%d]", i),
-			"lc", fmt.Sprintf("0x%x", lcVal),
-			"bs", fmt.Sprintf("0x%x", bsVal),
-			"match", match)
-	}
-	logger.InfoContext(ctx, "[DEBUG] All branch elements match", "result", allMatch)
-	logger.InfoContext(ctx, "[DEBUG] ===== END COMPARISON =====")
-}
-
-// computeBeaconBlockHeaderRootFromLC computes the hash tree root of a beacon block header from Light Client API
-func computeBeaconBlockHeaderRootFromLC(header *beacon.BeaconBlockHeader) []byte {
-	root, err := header.HashTreeRoot()
-	if err != nil {
-		return nil
-	}
-	return root[:]
-}
-
-// computeBeaconBlockHeaderRootFromUpdate computes the hash tree root of a beacon block header from ConsensusUpdate
-func computeBeaconBlockHeaderRootFromUpdate(header *lctypes.BeaconBlockHeader) []byte {
-	hh := fastssz.NewHasher()
-	hh.PutUint64(header.Slot)
-	hh.PutUint64(header.ProposerIndex)
-	hh.PutBytes(header.ParentRoot)
-	hh.PutBytes(header.StateRoot)
-	hh.PutBytes(header.BodyRoot)
-	hh.MerkleizeWithMixin(0, 5, 8)
-	root, _ := hh.HashRoot()
-	return root[:]
-}
-
-// findValidBlockSlot finds a valid block slot at or before the target slot
-func (pr *Prover) findValidBlockSlot(ctx context.Context, targetSlot uint64) (uint64, error) {
-	// Try the target slot first
-	_, err := pr.beaconClient.GetBeaconBlock(ctx, fmt.Sprintf("%d", targetSlot))
-	if err == nil {
-		return targetSlot, nil
-	}
-
-	// Search backward for a valid block
-	for offset := uint64(1); offset <= 32; offset++ {
-		if targetSlot < offset {
-			break
-		}
-		candidateSlot := targetSlot - offset
-		_, err := pr.beaconClient.GetBeaconBlock(ctx, fmt.Sprintf("%d", candidateSlot))
-		if err == nil {
-			return candidateSlot, nil
-		}
-	}
-
-	return 0, fmt.Errorf("no valid block found near slot %d", targetSlot)
 }
 
 // getSyncCommitteesInPeriod retrieves current and next sync committees for a specific period

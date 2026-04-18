@@ -186,85 +186,6 @@ func TestFindValidBlockSlot(t *testing.T) {
 	}
 }
 
-func TestFindSignatureAndAttestedSlot(t *testing.T) {
-	pr := newTestProver(t)
-	ctx := context.Background()
-
-	// Get finalized block
-	block, err := pr.beaconClient.GetBeaconBlock(ctx, "finalized")
-	if err != nil {
-		t.Skipf("Beacon API not available: %v", err)
-	}
-
-	// Get head block to check if chain has enough blocks
-	headBlock, err := pr.beaconClient.GetBeaconBlock(ctx, "head")
-	if err != nil {
-		t.Fatalf("Failed to get head block: %v", err)
-	}
-
-	finalizedSlot := uint64(block.Data.Message.Slot)
-	headSlot := uint64(headBlock.Data.Message.Slot)
-
-	// Need at least 2 slots after finalized for attested and signature blocks
-	// Attested slot is typically finalized + 1 epoch (8 slots for minimal)
-	// Signature slot is attested + 1
-	if headSlot < finalizedSlot+17 {
-		t.Skipf("Chain head (%d) is too close to finalized slot (%d), need more blocks for signature", headSlot, finalizedSlot)
-	}
-
-	// Get finalized block root
-	finalizedBlockRoot, err := pr.beaconClient.GetBlockRootByID(ctx, "finalized", true)
-	if err != nil {
-		t.Fatalf("Failed to get finalized block root: %v", err)
-	}
-
-	t.Logf("Testing findSignatureAndAttestedSlot: finalized_slot=%d, finalized_root=%s",
-		finalizedSlot, finalizedBlockRoot.Data.Root.String())
-
-	signatureSlot, attestedSlot, err := pr.findSignatureAndAttestedSlot(ctx, finalizedBlockRoot.Data.Root, finalizedSlot)
-	if err != nil {
-		t.Fatalf("findSignatureAndAttestedSlot failed: %v", err)
-	}
-
-	t.Logf("Found: signature_slot=%d, attested_slot=%d, finalized_slot=%d",
-		signatureSlot, attestedSlot, finalizedSlot)
-
-	// Verify slot ordering: signature > attested > finalized
-	if signatureSlot <= attestedSlot {
-		t.Errorf("Signature slot %d should be greater than attested slot %d", signatureSlot, attestedSlot)
-	}
-	if attestedSlot < finalizedSlot {
-		t.Errorf("Attested slot %d should be >= finalized slot %d", attestedSlot, finalizedSlot)
-	}
-
-	// Verify the signature block's parent is the attested block
-	signatureBlock, err := pr.beaconClient.GetBeaconBlock(ctx, fmt.Sprintf("%d", signatureSlot))
-	if err != nil {
-		t.Fatalf("Failed to get signature block: %v", err)
-	}
-
-	attestedBlockRoot, err := pr.beaconClient.GetBlockRootByID(ctx, fmt.Sprintf("%d", attestedSlot), true)
-	if err != nil {
-		t.Fatalf("Failed to get attested block root: %v", err)
-	}
-
-	if signatureBlock.Data.Message.ParentRoot.String() != attestedBlockRoot.Data.Root.String() {
-		t.Errorf("Signature block's parent_root %s doesn't match attested block root %s",
-			signatureBlock.Data.Message.ParentRoot.String(), attestedBlockRoot.Data.Root.String())
-	}
-
-	// Verify attested block's state has finalized_checkpoint.root == finalized block root
-	checkpoints, err := pr.beaconClient.GetFinalityCheckpointsAtState(ctx, fmt.Sprintf("%d", attestedSlot))
-	if err != nil {
-		t.Fatalf("Failed to get finality checkpoints at attested slot: %v", err)
-	}
-
-	if fmt.Sprintf("0x%x", checkpoints.Finalized.Root[:]) != finalizedBlockRoot.Data.Root.String() {
-		t.Errorf("Attested state's finalized_checkpoint.root %s doesn't match finalized block root %s",
-			fmt.Sprintf("0x%x", checkpoints.Finalized.Root[:]), finalizedBlockRoot.Data.Root.String())
-	}
-}
-
 func TestGetSyncCommitteesFromState(t *testing.T) {
 	pr := newTestProver(t)
 	ctx := context.Background()
@@ -352,44 +273,33 @@ func TestBuildConsensusUpdateWithSlots(t *testing.T) {
 	pr := newTestProver(t)
 	ctx := context.Background()
 
-	// Get finalized block info
-	block, err := pr.beaconClient.GetBeaconBlock(ctx, "finalized")
+	// SPEC.md flow: SignatureBlock → parent_root → AttestedBlock → state.finalized_checkpoint.root → FinalizedBlock
+	// Get head block as SignatureBlock
+	headBlock, err := pr.beaconClient.GetBeaconBlock(ctx, "head")
 	if err != nil {
 		t.Skipf("Beacon API not available: %v", err)
 	}
+	signatureSlot := uint64(headBlock.Data.Message.Slot)
 
-	// Get head block to check if chain has enough blocks
-	headBlock, err := pr.beaconClient.GetBeaconBlock(ctx, "head")
+	// Get AttestedBlock (parent of SignatureBlock)
+	attestedBlockRoot := headBlock.Data.Message.ParentRoot.String()
+	attestedBlock, err := pr.beaconClient.GetBeaconBlock(ctx, attestedBlockRoot)
 	if err != nil {
-		t.Fatalf("Failed to get head block: %v", err)
+		t.Fatalf("Failed to get attested block: %v", err)
 	}
+	attestedSlot := uint64(attestedBlock.Data.Message.Slot)
 
-	finalizedSlot := uint64(block.Data.Message.Slot)
-	headSlot := uint64(headBlock.Data.Message.Slot)
-
-	// Need enough blocks after finalized for attested and signature blocks
-	if headSlot < finalizedSlot+17 {
-		t.Skipf("Chain head (%d) is too close to finalized slot (%d), need more blocks", headSlot, finalizedSlot)
-	}
-
-	t.Logf("Testing buildConsensusUpdateWithSlots: version=%s", block.Version)
-
-	// Get finalized block root
-	finalizedBlockRoot, err := pr.beaconClient.GetBlockRootByID(ctx, "finalized", true)
+	// Get FinalizedBlock from AttestedState.finalized_checkpoint.root
+	checkpoints, err := pr.beaconClient.GetFinalityCheckpointsAtState(ctx, fmt.Sprintf("%d", attestedSlot))
 	if err != nil {
-		t.Fatalf("Failed to get finalized block root: %v", err)
+		t.Fatalf("Failed to get finality checkpoints at attested slot: %v", err)
 	}
+	finalizedBlockRoot := fmt.Sprintf("0x%x", checkpoints.Finalized.Root[:])
 
-	// Find signature and attested slots
-	signatureSlot, attestedSlot, err := pr.findSignatureAndAttestedSlot(ctx, finalizedBlockRoot.Data.Root, finalizedSlot)
-	if err != nil {
-		t.Fatalf("findSignatureAndAttestedSlot failed: %v", err)
-	}
+	t.Logf("Testing buildConsensusUpdateWithSlots: signature_slot=%d, attested_slot=%d, finalized_block=%s, version=%s",
+		signatureSlot, attestedSlot, finalizedBlockRoot, headBlock.Version)
 
-	t.Logf("Testing buildConsensusUpdateWithSlots: signature_slot=%d, attested_slot=%d, finalized_block=finalized, version=%s",
-		signatureSlot, attestedSlot, block.Version)
-
-	update, execHeader, err := pr.buildConsensusUpdateWithSlots(ctx, signatureSlot, attestedSlot, "finalized", block.Version, false)
+	update, execHeader, err := pr.buildConsensusUpdateWithSlots(ctx, signatureSlot, attestedSlot, finalizedBlockRoot, headBlock.Version, false)
 	if err != nil {
 		t.Fatalf("buildConsensusUpdateWithSlots failed: %v", err)
 	}
