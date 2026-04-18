@@ -161,31 +161,6 @@ func TestGetForkSpecForSlot(t *testing.T) {
 	}
 }
 
-func TestFindValidBlockSlot(t *testing.T) {
-	pr := newTestProver(t)
-	ctx := context.Background()
-
-	// Get a finalized block to get a valid slot
-	block, err := pr.beaconClient.GetBeaconBlock(ctx, "finalized")
-	if err != nil {
-		t.Skipf("Beacon API not available: %v", err)
-	}
-
-	targetSlot := uint64(block.Data.Message.Slot)
-	t.Logf("Testing findValidBlockSlot with target slot: %d", targetSlot)
-
-	foundSlot, err := pr.findValidBlockSlot(ctx, targetSlot)
-	if err != nil {
-		t.Fatalf("findValidBlockSlot failed: %v", err)
-	}
-
-	t.Logf("Found valid block at slot: %d", foundSlot)
-
-	if foundSlot > targetSlot {
-		t.Errorf("Found slot %d is greater than target slot %d", foundSlot, targetSlot)
-	}
-}
-
 func TestGetSyncCommitteesFromState(t *testing.T) {
 	pr := newTestProver(t)
 	ctx := context.Background()

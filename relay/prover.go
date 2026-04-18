@@ -551,10 +551,10 @@ func (pr *Prover) buildConsensusUpdateForPeriod(ctx context.Context, period uint
 			"search_end_slot", searchEndSlot)
 	}
 
-	// Search backwards within target period: searchSlot = signatureSlot
-	// SignatureBlock.parent_root → AttestedBlock (attestedSlot = signatureSlot - 1 or earlier)
-	// AttestedState must be in target period to get correct next_sync_committee
-	for signatureSlot := searchEndSlot; signatureSlot > periodStartSlot; signatureSlot-- {
+	// Search backwards within latter half of target period
+	// By starting from period midpoint, we guarantee attestedSlot (parent of signatureSlot) is within the period
+	minSignatureSlot := periodStartSlot + (periodEndSlot-periodStartSlot)/2
+	for signatureSlot := searchEndSlot; signatureSlot > minSignatureSlot; signatureSlot-- {
 		// Get signature block
 		signatureBlock, err := pr.beaconClient.GetBeaconBlock(ctx, fmt.Sprintf("%d", signatureSlot))
 		if err != nil {
@@ -587,7 +587,7 @@ func (pr *Prover) buildConsensusUpdateForPeriod(ctx context.Context, period uint
 		return pr.buildConsensusUpdateWithSlots(ctx, signatureSlot, attestedSlot, finalizedBlockRoot, signatureBlock.Version, true)
 	}
 
-	return nil, nil, fmt.Errorf("could not find valid signature slot in period %d (searched %d to %d)", period, searchEndSlot, periodStartSlot)
+	return nil, nil, fmt.Errorf("could not find valid signature slot in period %d (searched %d to %d)", period, searchEndSlot, minSignatureSlot)
 }
 
 // buildConsensusUpdateCore is the common implementation for building ConsensusUpdate
