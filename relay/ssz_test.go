@@ -1399,7 +1399,7 @@ func TestBuildConsensusUpdateForPeriod(t *testing.T) {
 			t.Logf("Testing buildConsensusUpdateForPeriod for period %d", period)
 
 			// Build consensus update for this period (not the latest period)
-			update, execPayload, err := pr.buildConsensusUpdateForPeriod(ctx, period, false)
+			update, execPayload, err := pr.buildConsensusUpdateForPeriod(ctx, period)
 			if err != nil {
 				t.Fatalf("buildConsensusUpdateForPeriod failed for period %d: %v", period, err)
 			}

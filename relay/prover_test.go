@@ -120,7 +120,7 @@ func newTestProver(t *testing.T) *Prover {
 
 	// Create a devnet config for testing (mainnet preset with all forks at epoch 0)
 	config := ProverConfig{
-		Network:        "kurtosis_minimal",
+		Network:        "minimal",
 		BeaconEndpoint: endpoint,
 	}
 

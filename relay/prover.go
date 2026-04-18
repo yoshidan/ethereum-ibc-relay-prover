@@ -176,10 +176,9 @@ func (pr *Prover) SetupHeadersForUpdate(ctx context.Context, counterparty core.F
 	//--------- In case statePeriod < latestPeriod ---------//
 
 	var (
-		headers                     []core.Header
-		trustedNextSyncCommittee    *lctypes.SyncCommittee
-		trustedCurrentSyncCommittee *lctypes.SyncCommittee
-		trustedHeight               = cs.GetLatestHeight().(clienttypes.Height)
+		headers                  []core.Header
+		trustedNextSyncCommittee *lctypes.SyncCommittee
+		trustedHeight            = cs.GetLatestHeight().(clienttypes.Height)
 	)
 	pr.GetLogger().DebugContext(ctx, "setup headers for updating the light-client", "state_period", statePeriod, "latest_period", latestPeriod, "client_state_latest_height", cs.GetLatestHeight().GetRevisionHeight())
 	// Get next sync committee for the state period
@@ -187,19 +186,17 @@ func (pr *Prover) SetupHeadersForUpdate(ctx context.Context, counterparty core.F
 	if err != nil {
 		return nil, fmt.Errorf("failed to get sync committees in period: state_period=%v %v", statePeriod, err)
 	}
-	for p := statePeriod + 1; p <= latestPeriod; p++ {
-		header, err := pr.buildNextSyncCommitteeUpdate(ctx, p, trustedHeight, trustedNextSyncCommittee, p == latestPeriod)
+	// Build intermediate headers for periods statePeriod+1 to latestPeriod-1
+	// The final lfh in latestPeriod will be verified using trustedNextSyncCommittee with IsNext=true
+	for p := statePeriod + 1; p < latestPeriod; p++ {
+		header, err := pr.buildNextSyncCommitteeUpdate(ctx, p, trustedHeight, trustedNextSyncCommittee)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build next sync committee update for next: period=%v trusted_height=%v %v", p, trustedHeight, err)
 		}
 		pr.GetLogger().DebugContext(ctx, "setup intermediate header for updating the light-client", "period", p, "trusted_height", header.TrustedSyncCommittee.TrustedHeight, "trusted_sync_committee", fmt.Sprintf("0x%x", header.TrustedSyncCommittee.SyncCommittee.AggregatePubkey), "is_next", header.TrustedSyncCommittee.IsNext, "untrusted_execution_block_number", header.ExecutionUpdate.BlockNumber, "next_sync_committee", fmt.Sprintf("0x%x", header.ConsensusUpdate.NextSyncCommittee.AggregatePubkey))
 		trustedHeight = clienttypes.NewHeight(0, header.ExecutionUpdate.BlockNumber)
-		trustedCurrentSyncCommittee = trustedNextSyncCommittee
 		trustedNextSyncCommittee = header.ConsensusUpdate.NextSyncCommittee
 		headers = append(headers, header)
-	}
-	if trustedCurrentSyncCommittee == nil { // never happen
-		panic(fmt.Errorf("trusted current sync committee must not be nil: period=%v", statePeriod))
 	}
 	if trustedHeight.GT(lfh.GetHeight()) {
 		return nil, fmt.Errorf("the latest finalized header is older than the trusted height: finalized_block_number=%v trusted_block_number=%v", lfh.GetHeight().GetRevisionHeight(), trustedHeight.GetRevisionHeight())
@@ -207,10 +204,11 @@ func (pr *Prover) SetupHeadersForUpdate(ctx context.Context, counterparty core.F
 		pr.GetLogger().DebugContext(ctx, "the latest finalized header is the same as the trusted height", "finalized_block_number", lfh.GetHeight().GetRevisionHeight(), "trusted_block_number", trustedHeight.GetRevisionHeight())
 		return core.MakeHeaderStream(headers...), nil
 	}
+	// lfh is in latestPeriod, verify using trustedNextSyncCommittee (committee for latestPeriod) with IsNext=true
 	lfh.TrustedSyncCommittee = &lctypes.TrustedSyncCommittee{
 		TrustedHeight: &trustedHeight,
-		SyncCommittee: trustedCurrentSyncCommittee,
-		IsNext:        false,
+		SyncCommittee: trustedNextSyncCommittee,
+		IsNext:        true,
 	}
 	headers = append(headers, lfh)
 	return core.MakeHeaderStream(headers...), nil
@@ -391,9 +389,9 @@ func (pr *Prover) getBootstrapInPeriod(ctx context.Context, period uint64) (*lct
 	return currentSyncCommittee, nil
 }
 
-func (pr *Prover) buildNextSyncCommitteeUpdate(ctx context.Context, period uint64, trustedHeight clienttypes.Height, trustedNextSyncCommittee *lctypes.SyncCommittee, isLatestPeriod bool) (*lctypes.Header, error) {
+func (pr *Prover) buildNextSyncCommitteeUpdate(ctx context.Context, period uint64, trustedHeight clienttypes.Height, trustedNextSyncCommittee *lctypes.SyncCommittee) (*lctypes.Header, error) {
 	// Build consensus update with next_sync_committee using standard Beacon API
-	lcUpdate, executionHeader, err := pr.buildConsensusUpdateForPeriod(ctx, period, isLatestPeriod)
+	lcUpdate, executionHeader, err := pr.buildConsensusUpdateForPeriod(ctx, period)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build consensus update for period %d: %w", period, err)
 	}
@@ -518,43 +516,25 @@ func (pr *Prover) getSyncCommitteesFromState(ctx context.Context, slot uint64, v
 }
 
 // buildConsensusUpdateForPeriod builds a ConsensusUpdate for a specific period with next_sync_committee
+// This function is only called for past periods (not the latest period), so all slots are already finalized.
 // Following SPEC.md design:
 //
 //	SignatureBlock (signatureSlot) → parent_root → AttestedBlock
 //	AttestedState → finalized_checkpoint.root → FinalizedBlock
 //	AttestedState → next_sync_committee (period+1's committee)
-func (pr *Prover) buildConsensusUpdateForPeriod(ctx context.Context, period uint64, isLatestPeriod bool) (*lctypes.ConsensusUpdate, *beacon.ExecutionPayloadHeader, error) {
+func (pr *Prover) buildConsensusUpdateForPeriod(ctx context.Context, period uint64) (*lctypes.ConsensusUpdate, *beacon.ExecutionPayloadHeader, error) {
 	periodStartSlot := pr.getPeriodBoundarySlot(period)
 	periodEndSlot := pr.getPeriodBoundarySlot(period+1) - 1
 
 	pr.GetLogger().DebugContext(ctx, "building consensus update for period",
 		"target_period", period,
-		"is_latest_period", isLatestPeriod,
 		"period_start_slot", periodStartSlot,
 		"period_end_slot", periodEndSlot)
-
-	// Determine search end slot
-	// For latest period, cap to current finalized slot
-	// For past periods, use period end slot (all slots are already finalized)
-	searchEndSlot := periodEndSlot
-	if isLatestPeriod {
-		finalizedBlock, err := pr.beaconClient.GetBeaconBlock(ctx, "finalized")
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to get finalized block: %w", err)
-		}
-		currentFinalizedSlot := uint64(finalizedBlock.Data.Message.Slot)
-		if searchEndSlot > currentFinalizedSlot {
-			searchEndSlot = currentFinalizedSlot
-		}
-		pr.GetLogger().DebugContext(ctx, "latest period: capped search range",
-			"current_finalized_slot", currentFinalizedSlot,
-			"search_end_slot", searchEndSlot)
-	}
 
 	// Search backwards within latter half of target period
 	// By starting from period midpoint, we guarantee attestedSlot (parent of signatureSlot) is within the period
 	minSignatureSlot := periodStartSlot + (periodEndSlot-periodStartSlot)/2
-	for signatureSlot := searchEndSlot; signatureSlot > minSignatureSlot; signatureSlot-- {
+	for signatureSlot := periodEndSlot; signatureSlot > minSignatureSlot; signatureSlot-- {
 		// Get signature block
 		signatureBlock, err := pr.beaconClient.GetBeaconBlock(ctx, fmt.Sprintf("%d", signatureSlot))
 		if err != nil {
@@ -587,7 +567,7 @@ func (pr *Prover) buildConsensusUpdateForPeriod(ctx context.Context, period uint
 		return pr.buildConsensusUpdateWithSlots(ctx, signatureSlot, attestedSlot, finalizedBlockRoot, signatureBlock.Version, true)
 	}
 
-	return nil, nil, fmt.Errorf("could not find valid signature slot in period %d (searched %d to %d)", period, searchEndSlot, minSignatureSlot)
+	return nil, nil, fmt.Errorf("could not find valid signature slot in period %d (searched %d to %d)", period, periodEndSlot, minSignatureSlot)
 }
 
 // buildConsensusUpdateCore is the common implementation for building ConsensusUpdate
@@ -873,18 +853,6 @@ func (pr *Prover) buildConsensusUpdateWithSlots(ctx context.Context, signatureSl
 		"finality_branch_len", len(update.FinalizedHeaderBranch),
 		"execution_branch_len", len(update.FinalizedExecutionBranch),
 		"signature_slot", update.SignatureSlot)
-
-	// Log branch values for debugging
-	for i, b := range update.FinalizedHeaderBranch {
-		pr.GetLogger().DebugContext(ctx, "[DEBUG] finality_branch",
-			"index", i,
-			"value", fmt.Sprintf("0x%x", b))
-	}
-	for i, b := range update.FinalizedExecutionBranch {
-		pr.GetLogger().DebugContext(ctx, "[DEBUG] execution_branch",
-			"index", i,
-			"value", fmt.Sprintf("0x%x", b))
-	}
 
 	return update, parsedFinalizedBlock.ExecutionPayload, nil
 }
