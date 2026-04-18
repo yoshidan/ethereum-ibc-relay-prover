@@ -279,7 +279,8 @@ func (pr *Prover) buildInitialState(ctx context.Context, blockNumber uint64) (*I
 // GetLatestFinalizedHeader returns the latest finalized header on this chain
 // The returned header is expected to be the latest one of headers that can be verified by the light client
 func (pr *Prover) GetLatestFinalizedHeader(ctx context.Context) (headers core.Header, err error) {
-	lcUpdate, executionHeader, err := pr.buildConsensusUpdateFromBeaconAPI(ctx, false)
+	// Always include next_sync_committee so this header can be used for period updates
+	lcUpdate, executionHeader, err := pr.buildConsensusUpdateFromBeaconAPI(ctx, true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build consensus update: %w", err)
 	}
@@ -463,22 +464,55 @@ func (pr *Prover) getForkSpecForSlot(slot uint64) *lctypes.ForkSpec {
 //	AttestedState → finalized_checkpoint.root → FinalizedBlock
 //	AttestedState → next_sync_committee
 func (pr *Prover) buildConsensusUpdateFromBeaconAPI(ctx context.Context, includeNextSyncCommittee bool) (*lctypes.ConsensusUpdate, *beacon.ExecutionPayloadHeader, error) {
-	// 1. Get head block as SignatureBlock candidate
+	const maxRetries = 10
+
+	// 1. Get head block as starting point
 	headBlock, err := pr.beaconClient.GetBeaconBlock(ctx, "head")
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get head block: %w", err)
 	}
-	signatureSlot := uint64(headBlock.Data.Message.Slot)
 
-	// 2. Get AttestedBlock (parent of SignatureBlock)
-	attestedBlockRoot := headBlock.Data.Message.ParentRoot.String()
+	// 2. Search for a block with sufficient sync committee participation
+	signatureSlot := uint64(headBlock.Data.Message.Slot)
+	var signatureBlock *beacon.BeaconBlockResponse
+
+	for i := 0; i < maxRetries; i++ {
+		block, err := pr.beaconClient.GetBeaconBlock(ctx, fmt.Sprintf("%d", signatureSlot))
+		if err != nil {
+			signatureSlot--
+			continue
+		}
+
+		// Check sync committee participation rate (require >= 2/3)
+		// Use integer arithmetic to avoid floating point rounding issues
+		setBits, totalBits := pr.countSyncCommitteeBits(block.Data.Message.Body.SyncAggregate.SyncCommitteeBits)
+		pr.GetLogger().DebugContext(ctx, "checking sync committee participation",
+			"slot", signatureSlot,
+			"set_bits", setBits,
+			"total_bits", totalBits)
+
+		// setBits/totalBits >= 2/3  =>  setBits * 3 >= totalBits * 2
+		if setBits*3 >= totalBits*2 {
+			signatureBlock = block
+			break
+		}
+
+		signatureSlot--
+	}
+
+	if signatureBlock == nil {
+		return nil, nil, fmt.Errorf("could not find block with sufficient sync committee participation within %d retries", maxRetries)
+	}
+
+	// 3. Get AttestedBlock (parent of SignatureBlock)
+	attestedBlockRoot := signatureBlock.Data.Message.ParentRoot.String()
 	attestedBlock, err := pr.beaconClient.GetBeaconBlock(ctx, attestedBlockRoot)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get attested block: %w", err)
 	}
 	attestedSlot := uint64(attestedBlock.Data.Message.Slot)
 
-	// 3. Get FinalizedBlock from AttestedState.finalized_checkpoint.root
+	// 4. Get FinalizedBlock from AttestedState.finalized_checkpoint.root
 	checkpoints, err := pr.beaconClient.GetFinalityCheckpointsAtState(ctx, fmt.Sprintf("%d", attestedSlot))
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get finality checkpoints at attested slot %d: %w", attestedSlot, err)
@@ -491,8 +525,27 @@ func (pr *Prover) buildConsensusUpdateFromBeaconAPI(ctx context.Context, include
 		"finalized_checkpoint_root", finalizedBlockRoot,
 		"finalized_checkpoint_epoch", checkpoints.Finalized.Epoch)
 
-	// 4. Build consensus update
-	return pr.buildConsensusUpdateWithSlots(ctx, signatureSlot, attestedSlot, finalizedBlockRoot, headBlock.Version, includeNextSyncCommittee)
+	// 5. Build consensus update
+	return pr.buildConsensusUpdateWithSlots(ctx, signatureSlot, attestedSlot, finalizedBlockRoot, signatureBlock.Version, includeNextSyncCommittee)
+}
+
+// countSyncCommitteeBits counts the set bits and total bits in sync_committee_bits
+func (pr *Prover) countSyncCommitteeBits(bits []byte) (setBits int, totalBits int) {
+	totalBits = len(bits) * 8
+	for _, b := range bits {
+		setBits += popCount(b)
+	}
+	return
+}
+
+// popCount counts the number of set bits in a byte
+func popCount(b byte) int {
+	count := 0
+	for b != 0 {
+		count += int(b & 1)
+		b >>= 1
+	}
+	return count
 }
 
 // getSyncCommitteesFromState retrieves current and next sync committees from beacon state
