@@ -153,15 +153,6 @@ func (cl Client) GetFinalityCheckpointsAtState(ctx context.Context, stateId stri
 	return ToStateFinalityCheckpoints(res)
 }
 
-// GetSyncCommittees retrieves the sync committees for a state
-func (cl Client) GetSyncCommittees(ctx context.Context, stateId string) (*SyncCommitteesResponse, error) {
-	var res SyncCommitteesResponse
-	if err := cl.get(ctx, fmt.Sprintf("/eth/v1/beacon/states/%s/sync_committees", stateId), &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
 func (cl Client) get(ctx context.Context, path string, res any) error {
 	log.GetLogger().DebugContext(ctx, "Beacon API request", "endpoint", cl.endpoint+path)
 	req, err := http.NewRequestWithContext(ctx, "GET", cl.endpoint+path, nil)

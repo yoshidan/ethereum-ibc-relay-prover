@@ -741,6 +741,12 @@ func (pr *Prover) buildConsensusUpdateForPeriod(ctx context.Context, period uint
 		return nil, nil, fmt.Errorf("failed to find signature and attested slots: %w", err)
 	}
 
+	pr.GetLogger().DebugContext(ctx, "found signature and attested slots",
+		"signature_slot", signatureSlot,
+		"attested_slot", attestedSlot,
+		"finalized_slot", bestFinalizedSlot,
+		"finalized_root", fmt.Sprintf("0x%x", bestFinalizedRoot))
+
 	// Build consensus update using the explicit slots
 	finalizedBlockId := fmt.Sprintf("0x%x", bestFinalizedRoot)
 	return pr.buildConsensusUpdateWithSlots(ctx, signatureSlot, attestedSlot, finalizedBlockId, bestVersion, true)
@@ -934,10 +940,22 @@ func (pr *Prover) buildConsensusUpdateWithSlots(ctx context.Context, signatureSl
 		return nil, nil, fmt.Errorf("failed to parse attested state SSZ: %w", err)
 	}
 
+	// Debug: log state info including finalized checkpoint
+	fcEpoch, fcRoot := parsedState.GetFinalizedCheckpoint()
+	pr.GetLogger().DebugContext(ctx, "[DEBUG] attested state parsed",
+		"attested_slot", attestedSlot,
+		"state_ssz_size", len(attestedStateSSZ),
+		"finalized_checkpoint_epoch", fcEpoch,
+		"finalized_checkpoint_root", fmt.Sprintf("0x%x", fcRoot))
+
 	finalityBranch, err := parsedState.GenerateFinalityBranch()
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to generate finality branch: %w", err)
 	}
+
+	pr.GetLogger().DebugContext(ctx, "[DEBUG] finality branch generated",
+		"branch_len", len(finalityBranch),
+		"epoch_hash", fmt.Sprintf("0x%x", finalityBranch[0]))
 
 	// Get finalized block SSZ for execution_branch generation
 	finalizedBlockSSZ, err := pr.beaconClient.GetBeaconBlockSSZ(ctx, finalizedBlockId)
@@ -1003,6 +1021,31 @@ func (pr *Prover) buildConsensusUpdateWithSlots(ctx context.Context, signatureSl
 			return nil, nil, fmt.Errorf("failed to generate next sync committee branch: %w", err)
 		}
 		update.NextSyncCommitteeBranch = nextSyncCommitteeBranch
+	}
+
+	// Debug logging for consensus update
+	pr.GetLogger().InfoContext(ctx, "[DEBUG] consensus update built",
+		"attested_header.slot", update.AttestedHeader.Slot,
+		"attested_header.state_root", fmt.Sprintf("0x%x", update.AttestedHeader.StateRoot),
+		"attested_header.body_root", fmt.Sprintf("0x%x", update.AttestedHeader.BodyRoot),
+		"finalized_header.slot", update.FinalizedHeader.Slot,
+		"finalized_header.state_root", fmt.Sprintf("0x%x", update.FinalizedHeader.StateRoot),
+		"finalized_header.body_root", fmt.Sprintf("0x%x", update.FinalizedHeader.BodyRoot),
+		"finalized_execution_root", fmt.Sprintf("0x%x", update.FinalizedExecutionRoot),
+		"finality_branch_len", len(update.FinalizedHeaderBranch),
+		"execution_branch_len", len(update.FinalizedExecutionBranch),
+		"signature_slot", update.SignatureSlot)
+
+	// Log branch values for debugging
+	for i, b := range update.FinalizedHeaderBranch {
+		pr.GetLogger().DebugContext(ctx, "[DEBUG] finality_branch",
+			"index", i,
+			"value", fmt.Sprintf("0x%x", b))
+	}
+	for i, b := range update.FinalizedExecutionBranch {
+		pr.GetLogger().DebugContext(ctx, "[DEBUG] execution_branch",
+			"index", i,
+			"value", fmt.Sprintf("0x%x", b))
 	}
 
 	// Debug: Compare with Light Client API

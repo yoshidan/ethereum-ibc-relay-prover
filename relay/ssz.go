@@ -126,6 +126,25 @@ type ParsedBeaconState struct {
 	version      string
 }
 
+// GetFinalizedCheckpoint returns the finalized checkpoint epoch and root for debugging
+func (p *ParsedBeaconState) GetFinalizedCheckpoint() (epoch uint64, root []byte) {
+	switch p.version {
+	case "fulu":
+		if p.stateFulu != nil && p.stateFulu.FinalizedCheckpoint != nil {
+			return uint64(p.stateFulu.FinalizedCheckpoint.Epoch), p.stateFulu.FinalizedCheckpoint.Root
+		}
+	case "electra":
+		if p.stateElectra != nil && p.stateElectra.FinalizedCheckpoint != nil {
+			return uint64(p.stateElectra.FinalizedCheckpoint.Epoch), p.stateElectra.FinalizedCheckpoint.Root
+		}
+	case "deneb":
+		if p.stateDeneb != nil && p.stateDeneb.FinalizedCheckpoint != nil {
+			return uint64(p.stateDeneb.FinalizedCheckpoint.Epoch), p.stateDeneb.FinalizedCheckpoint.Root
+		}
+	}
+	return 0, nil
+}
+
 // GenerateFinalityBranch generates the Merkle proof for the finalized_checkpoint.root field
 // The proof consists of two parts:
 // 1. Proof from finalized_checkpoint.root to finalized_checkpoint container (epoch hash)
