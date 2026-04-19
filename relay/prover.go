@@ -893,6 +893,7 @@ func (pr *Prover) buildConsensusUpdateWithSlots(ctx context.Context, signatureSl
 		}
 		update.NextSyncCommitteeBranch = nextSyncCommitteeBranch
 	}
+	//TODO ここでupdate.SyncCommitteeを取得すれば別途getBootstrapInPeriodとかを別の場所で呼ぶ必要がなくなる。
 
 	// Debug logging for consensus update
 	pr.GetLogger().InfoContext(ctx, "[DEBUG] consensus update built",
