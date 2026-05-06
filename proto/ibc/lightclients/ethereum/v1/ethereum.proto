@@ -1,51 +1,10 @@
-// This is a fork version from https://github.com/datachainlab/ethereum-ibc-rs/blob/v0.0.5/proto/definitions/ibc/lightclients/ethereum/v1/ethereum.proto
-// WARNINGS: We should only apply to the gogoproto extension here and should never make any changes to the message format(includes a field type and order).
 syntax = "proto3";
 package ibc.lightclients.ethereum.v1;
 
-option go_package = "github.com/datachainlab/ethereum-ibc-relay-prover/light-clients/ethereum/types";
+option go_package = "github.com/datachainlab/ethereum-light-client-types/prover/types";
 import "ibc/core/client/v1/client.proto";
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/duration.proto";
-import "gogoproto/gogo.proto";
-option (gogoproto.goproto_getters_all) = false;
-
-message ClientState {
-  bytes genesis_validators_root = 1;
-  uint64 min_sync_committee_participants = 2;
-  uint64 genesis_time = 3;
-  ForkParameters fork_parameters = 4;
-  uint64 seconds_per_slot = 5;
-  uint64 slots_per_epoch = 6;
-  uint64 epochs_per_sync_committee_period = 7;
-
-  bytes ibc_address = 8;
-  bytes ibc_commitments_slot = 9;
-
-  Fraction trust_level = 10;
-  google.protobuf.Duration trusting_period = 11 [(gogoproto.nullable) = false, (gogoproto.stdduration) = true];
-  google.protobuf.Duration max_clock_drift = 12 [(gogoproto.nullable) = false, (gogoproto.stdduration) = true];
-
-  uint64 latest_execution_block_number = 13;
-  ibc.core.client.v1.Height frozen_height = 14;
-}
-
-message ConsensusState {
-  uint64 slot = 1;
-  bytes storage_root = 2;
-  google.protobuf.Timestamp timestamp = 3 [(gogoproto.nullable) = false, (gogoproto.stdtime) = true];
-  bytes current_sync_committee = 4;
-  bytes next_sync_committee = 5;
-}
-
-message Header {
-  TrustedSyncCommittee trusted_sync_committee = 1;
-  ConsensusUpdate consensus_update = 2;
-  ExecutionUpdate execution_update = 3;
-  AccountUpdate account_update = 4;
-  // seconds from unix epoch
-  uint64 timestamp = 5;
-}
 
 message TrustedSyncCommittee {
   ibc.core.client.v1.Height trusted_height = 1;
@@ -76,6 +35,7 @@ message ForkSpec {
   uint32 execution_payload_gindex = 4;
   uint32 execution_payload_state_root_gindex = 5;
   uint32 execution_payload_block_number_gindex = 6;
+  uint32 execution_block_hash_gindex = 7;
 }
 
 message ConsensusUpdate {
@@ -105,6 +65,9 @@ message ExecutionUpdate {
   repeated bytes state_root_branch = 2;
   uint64 block_number = 3;
   repeated bytes block_number_branch = 4;
+  bytes rlp = 5;
+  bytes block_hash = 6;
+  repeated bytes block_hash_branch = 7;
 }
 
 message AccountUpdate {
@@ -118,18 +81,4 @@ message BeaconBlockHeader {
   bytes parent_root = 3;
   bytes state_root = 4;
   bytes body_root = 5;
-}
-
-message FinalizedHeaderMisbehaviour {
-  string client_id = 1;
-  TrustedSyncCommittee trusted_sync_committee = 2;
-  ConsensusUpdate consensus_update_1 = 3;
-  ConsensusUpdate consensus_update_2 = 4;
-}
-
-message NextSyncCommitteeMisbehaviour {
-  string client_id = 1;
-  TrustedSyncCommittee trusted_sync_committee = 2;
-  ConsensusUpdate consensus_update_1 = 3;
-  ConsensusUpdate consensus_update_2 = 4;
 }
