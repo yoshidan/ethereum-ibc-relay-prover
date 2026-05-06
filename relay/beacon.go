@@ -119,19 +119,19 @@ func (pr *Prover) buildExecutionUpdate(executionHeader *beacon.ExecutionPayloadH
 
 // buildExecutionUpdateFromBlockHash fetches the block header from execution layer
 // using debug_getRawHeader and builds ExecutionUpdate for Gloas fork
-func (pr *Prover) buildExecutionUpdateFromBlockHash(ctx context.Context, blockHash []byte) (*lctypes.ExecutionUpdate, uint64, uint64, error) {
+func (pr *Prover) buildExecutionUpdateFromBlockHash(ctx context.Context, blockHash []byte) (*lctypes.ExecutionUpdate, uint64, error) {
 	hash := common.BytesToHash(blockHash)
 
 	// Fetch RLP-encoded header via debug_getRawHeader
 	rlpHeader, err := pr.getRawHeader(ctx, hash)
 	if err != nil {
-		return nil, 0, 0, fmt.Errorf("failed to get raw header: %w", err)
+		return nil, 0, fmt.Errorf("failed to get raw header: %w", err)
 	}
 
 	// Decode RLP to extract state_root and block_number
 	header := new(types.Header)
 	if err := rlp.DecodeBytes(rlpHeader, header); err != nil {
-		return nil, 0, 0, fmt.Errorf("failed to decode RLP header: %w", err)
+		return nil, 0, fmt.Errorf("failed to decode RLP header: %w", err)
 	}
 
 	// For Gloas, we use RLP verification instead of SSZ merkle proofs
@@ -142,7 +142,7 @@ func (pr *Prover) buildExecutionUpdateFromBlockHash(ctx context.Context, blockHa
 		BlockNumber:       header.Number.Uint64(),
 		BlockNumberBranch: nil, // Not used in Gloas (RLP verification)
 		Rlp:               rlpHeader,
-	}, header.Number.Uint64(), header.Time, nil
+	}, header.Time, nil
 }
 
 // getRawHeader fetches RLP-encoded block header via debug_getRawHeader
