@@ -28,19 +28,36 @@ type BlockRootResponse struct {
 }
 
 type LightClientHeader struct {
-	Beacon          BeaconBlockHeader
-	Execution       ExecutionPayloadHeader
-	ExecutionBranch []hexutil.Bytes
+	Beacon             BeaconBlockHeader
+	Execution          *ExecutionPayloadHeader // Required for pre-Gloas
+	ExecutionBlockHash []byte                  // Required for Gloas+
+	ExecutionBranch    []hexutil.Bytes
+}
+
+// IsGloas returns true if this header is from Gloas fork or later
+func (h *LightClientHeader) IsGloas() bool {
+	return h.Execution == nil
+}
+
+// GetExecutionRoot returns the execution root (HashTreeRoot for pre-Gloas, BlockHash for Gloas)
+func (h *LightClientHeader) GetExecutionRoot() []byte {
+	if h.IsGloas() {
+		return h.ExecutionBlockHash
+	}
+	root, err := h.Execution.HashTreeRoot()
+	if err != nil {
+		panic(err)
+	}
+	return root[:]
 }
 
 func (h *LightClientHeader) UnmarshalJSON(bz []byte) error {
-	type LightClientHeaderJSON struct {
-		Beacon          types.BeaconBlockHeader             `json:"beacon"`
-		Execution       builder.ExecutionPayloadHeaderDeneb `json:"execution"`
-		ExecutionBranch []hexutil.Bytes                     `json:"execution_branch"`
+	var hj struct {
+		Beacon             types.BeaconBlockHeader              `json:"beacon"`
+		Execution          *builder.ExecutionPayloadHeaderDeneb `json:"execution,omitempty"`
+		ExecutionBlockHash hexutil.Bytes                        `json:"execution_block_hash,omitempty"`
+		ExecutionBranch    []hexutil.Bytes                      `json:"execution_branch"`
 	}
-
-	var hj LightClientHeaderJSON
 	if err := json.Unmarshal(bz, &hj); err != nil {
 		return err
 	}
@@ -52,15 +69,20 @@ func (h *LightClientHeader) UnmarshalJSON(bz []byte) error {
 	if err != nil {
 		return err
 	}
-	*h = LightClientHeader{
-		Beacon: BeaconBlockHeader{
-			Slot:          primitives.Slot(slot),
-			ProposerIndex: primitives.ValidatorIndex(proposerIndex),
-			ParentRoot:    hj.Beacon.ParentRoot,
-			StateRoot:     hj.Beacon.StateRoot,
-			BodyRoot:      hj.Beacon.BodyRoot,
-		},
-		Execution: enginev1.ExecutionPayloadHeaderDeneb{
+	h.Beacon = BeaconBlockHeader{
+		Slot:          primitives.Slot(slot),
+		ProposerIndex: primitives.ValidatorIndex(proposerIndex),
+		ParentRoot:    hj.Beacon.ParentRoot,
+		StateRoot:     hj.Beacon.StateRoot,
+		BodyRoot:      hj.Beacon.BodyRoot,
+	}
+	h.ExecutionBranch = hj.ExecutionBranch
+	if hj.ExecutionBlockHash != nil {
+		// Gloas format
+		h.ExecutionBlockHash = hj.ExecutionBlockHash
+	} else if hj.Execution != nil {
+		// Pre-Gloas format
+		h.Execution = &enginev1.ExecutionPayloadHeaderDeneb{
 			ParentHash:       hj.Execution.ParentHash,
 			FeeRecipient:     hj.Execution.FeeRecipient,
 			StateRoot:        hj.Execution.StateRoot,
@@ -78,8 +100,7 @@ func (h *LightClientHeader) UnmarshalJSON(bz []byte) error {
 			WithdrawalsRoot:  hj.Execution.WithdrawalsRoot,
 			BlobGasUsed:      uint64(hj.Execution.BlobGasUsed),
 			ExcessBlobGas:    uint64(hj.Execution.ExcessBlobGas),
-		},
-		ExecutionBranch: hj.ExecutionBranch,
+		}
 	}
 	return nil
 }

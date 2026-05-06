@@ -230,10 +230,17 @@ func (pr *Prover) buildInitialState(ctx context.Context, blockNumber uint64) (*I
 	if err != nil {
 		return nil, fmt.Errorf("failed to get light-client finality update: %v", err)
 	}
-	if eh := &res.Data.FinalizedHeader.Execution; blockNumber == 0 {
-		blockNumber = eh.BlockNumber
-	} else if eh.BlockNumber < blockNumber {
-		return nil, fmt.Errorf("the height is not finalized yet: blockNumber=%v finalized_block_number=%v", blockNumber, eh.BlockNumber)
+	finalizedHeader := &res.Data.FinalizedHeader
+
+	_, finalizedBlockNumber, _, err := pr.buildExecutionUpdateFromFinalizedHeader(ctx, finalizedHeader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build execution update from finalized header: %v", err)
+	}
+
+	if blockNumber == 0 {
+		blockNumber = finalizedBlockNumber
+	} else if finalizedBlockNumber < blockNumber {
+		return nil, fmt.Errorf("the height is not finalized yet: blockNumber=%v finalized_block_number=%v", blockNumber, finalizedBlockNumber)
 	}
 
 	timestamp, err := pr.chain.Timestamp(ctx, pr.newHeight(int64(blockNumber)))
@@ -290,29 +297,29 @@ func (pr *Prover) GetLatestFinalizedHeader(ctx context.Context) (headers core.He
 		return nil, err
 	}
 	lcUpdate := res.Data.ToProto()
-	executionHeader := &res.Data.FinalizedHeader.Execution
-	executionUpdate, err := pr.buildExecutionUpdate(executionHeader)
+	finalizedHeader := &res.Data.FinalizedHeader
+
+	executionUpdate, blockNumber, timestamp, err := pr.buildExecutionUpdateFromFinalizedHeader(ctx, finalizedHeader)
 	if err != nil {
-		return nil, fmt.Errorf("failed to build execution update: %v", err)
+		return nil, fmt.Errorf("failed to build execution update from finalized header: %v", err)
 	}
-	executionRoot, err := executionHeader.HashTreeRoot()
-	if err != nil {
-		return nil, fmt.Errorf("failed to calculate execution root: %v", err)
-	}
-	if !bytes.Equal(executionRoot[:], lcUpdate.FinalizedExecutionRoot) {
+	stateRootHex := hex.EncodeToString(executionUpdate.StateRoot)
+
+	executionRoot := finalizedHeader.GetExecutionRoot()
+	if !bytes.Equal(executionRoot, lcUpdate.FinalizedExecutionRoot) {
 		return nil, fmt.Errorf("execution root mismatch: %X != %X", executionRoot, lcUpdate.FinalizedExecutionRoot)
 	}
 
-	accountUpdate, err := pr.buildAccountUpdate(ctx, executionHeader.BlockNumber)
+	accountUpdate, err := pr.buildAccountUpdate(ctx, blockNumber)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build account update: %v", err)
 	}
-	pr.GetLogger().InfoContext(ctx, "build latest finalized header", "block_number", executionHeader.BlockNumber, "timestamp", executionHeader.Timestamp, "state_root", hex.EncodeToString(executionHeader.StateRoot))
+	pr.GetLogger().InfoContext(ctx, "build latest finalized header", "block_number", blockNumber, "timestamp", timestamp, "state_root", stateRootHex)
 	return &lctypes.Header{
 		ConsensusUpdate: lcUpdate,
 		ExecutionUpdate: executionUpdate,
 		AccountUpdate:   accountUpdate,
-		Timestamp:       executionHeader.Timestamp,
+		Timestamp:       timestamp,
 	}, nil
 }
 
@@ -426,20 +433,19 @@ func (pr *Prover) buildNextSyncCommitteeUpdate(ctx context.Context, period uint6
 		return nil, err
 	}
 	lcUpdate := res.Data.ToProto()
-	executionHeader := &res.Data.FinalizedHeader.Execution
-	executionUpdate, err := pr.buildExecutionUpdate(executionHeader)
+	finalizedHeader := &res.Data.FinalizedHeader
+
+	executionUpdate, blockNumber, timestamp, err := pr.buildExecutionUpdateFromFinalizedHeader(ctx, finalizedHeader)
 	if err != nil {
-		return nil, fmt.Errorf("failed to build execution update: %v", err)
+		return nil, fmt.Errorf("failed to build execution update from finalized header: %v", err)
 	}
-	executionRoot, err := executionHeader.HashTreeRoot()
-	if err != nil {
-		return nil, fmt.Errorf("failed to calculate execution root: %v", err)
-	}
-	if !bytes.Equal(executionRoot[:], lcUpdate.FinalizedExecutionRoot) {
+
+	executionRoot := finalizedHeader.GetExecutionRoot()
+	if !bytes.Equal(executionRoot, lcUpdate.FinalizedExecutionRoot) {
 		return nil, fmt.Errorf("execution root mismatch: %X != %X", executionRoot, lcUpdate.FinalizedExecutionRoot)
 	}
 
-	accountUpdate, err := pr.buildAccountUpdate(ctx, executionHeader.BlockNumber)
+	accountUpdate, err := pr.buildAccountUpdate(ctx, blockNumber)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build account update: %v", err)
 	}
@@ -452,8 +458,23 @@ func (pr *Prover) buildNextSyncCommitteeUpdate(ctx context.Context, period uint6
 		ConsensusUpdate: lcUpdate,
 		ExecutionUpdate: executionUpdate,
 		AccountUpdate:   accountUpdate,
-		Timestamp:       executionHeader.Timestamp,
+		Timestamp:       timestamp,
 	}, nil
+}
+
+// buildExecutionUpdateFromFinalizedHeader builds ExecutionUpdate from finalized header.
+// Returns executionUpdate, blockNumber, timestamp.
+// Handles both Gloas (RLP-based) and pre-Gloas (SSZ merkle proof) cases.
+func (pr *Prover) buildExecutionUpdateFromFinalizedHeader(ctx context.Context, finalizedHeader *beacon.LightClientHeader) (*lctypes.ExecutionUpdate, uint64, uint64, error) {
+	if finalizedHeader.IsGloas() {
+		return pr.buildExecutionUpdateFromBlockHash(ctx, finalizedHeader.ExecutionBlockHash)
+	}
+	executionHeader := finalizedHeader.Execution
+	executionUpdate, err := pr.buildExecutionUpdate(executionHeader)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	return executionUpdate, executionHeader.BlockNumber, executionHeader.Timestamp, nil
 }
 
 //--------- StateProver implementation ---------//

@@ -6,6 +6,10 @@ import (
 
 	"github.com/datachainlab/ethereum-ibc-relay-prover/beacon"
 	lctypes "github.com/datachainlab/ethereum-ibc-relay-prover/light-clients/ethereum/types"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/rlp"
 )
 
 const (
@@ -112,3 +116,44 @@ func (pr *Prover) buildExecutionUpdate(executionHeader *beacon.ExecutionPayloadH
 		BlockNumberBranch: blockNumberBranch,
 	}, nil
 }
+
+// buildExecutionUpdateFromBlockHash fetches the block header from execution layer
+// using debug_getRawHeader and builds ExecutionUpdate for Gloas fork
+func (pr *Prover) buildExecutionUpdateFromBlockHash(ctx context.Context, blockHash []byte) (*lctypes.ExecutionUpdate, uint64, uint64, error) {
+	hash := common.BytesToHash(blockHash)
+
+	// Fetch RLP-encoded header via debug_getRawHeader
+	rlpHeader, err := pr.getRawHeader(ctx, hash)
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("failed to get raw header: %w", err)
+	}
+
+	// Decode RLP to extract state_root and block_number
+	header := new(types.Header)
+	if err := rlp.DecodeBytes(rlpHeader, header); err != nil {
+		return nil, 0, 0, fmt.Errorf("failed to decode RLP header: %w", err)
+	}
+
+	// For Gloas, we use RLP verification instead of SSZ merkle proofs
+	// The verifier will check: keccak256(rlp) == execution_block_hash
+	return &lctypes.ExecutionUpdate{
+		StateRoot:         header.Root.Bytes(),
+		StateRootBranch:   nil, // Not used in Gloas (RLP verification)
+		BlockNumber:       header.Number.Uint64(),
+		BlockNumberBranch: nil, // Not used in Gloas (RLP verification)
+		Rlp:               rlpHeader,
+	}, header.Number.Uint64(), header.Time, nil
+}
+
+// getRawHeader fetches RLP-encoded block header via debug_getRawHeader
+func (pr *Prover) getRawHeader(ctx context.Context, blockHash common.Hash) ([]byte, error) {
+	var result hexutil.Bytes
+	err := pr.executionClient.Raw().CallContext(
+		ctx, &result, "debug_getRawHeader", blockHash,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+

@@ -46,17 +46,14 @@ type Checkpoint struct {
 }
 
 func (lcu *LightClientUpdateData) ToProto() *lctypes.ConsensusUpdate {
-	executionRoot, err := lcu.FinalizedHeader.Execution.HashTreeRoot()
-	if err != nil {
-		panic(err)
-	}
+	executionRoot := lcu.FinalizedHeader.GetExecutionRoot()
 	return &lctypes.ConsensusUpdate{
 		AttestedHeader:           lcu.AttestedHeader.ToProto(),
 		NextSyncCommittee:        lcu.NextSyncCommittee.ToProto(),
 		NextSyncCommitteeBranch:  convertToBytesSlice(lcu.NextSyncCommitteeBranch),
 		FinalizedHeader:          lcu.FinalizedHeader.ToProto(),
 		FinalizedHeaderBranch:    convertToBytesSlice(lcu.FinalityBranch),
-		FinalizedExecutionRoot:   executionRoot[:],
+		FinalizedExecutionRoot:   executionRoot,
 		FinalizedExecutionBranch: convertToBytesSlice(lcu.FinalizedHeader.ExecutionBranch),
 		SyncAggregate:            lcu.SyncAggregate.ToProto(),
 		SignatureSlot:            uint64(lcu.SignatureSlot),
@@ -71,17 +68,13 @@ func (sc *SyncCommittee) ToProto() *lctypes.SyncCommittee {
 }
 
 func (lcf *LightClientFinalityUpdate) ToProto() *lctypes.ConsensusUpdate {
-	executionRoot, err := lcf.FinalizedHeader.Execution.HashTreeRoot()
-	if err != nil {
-		panic(err)
-	}
 	return &lctypes.ConsensusUpdate{
 		AttestedHeader:           lcf.AttestedHeader.ToProto(),
 		NextSyncCommittee:        nil,
 		NextSyncCommitteeBranch:  nil,
 		FinalizedHeader:          lcf.FinalizedHeader.ToProto(),
 		FinalizedHeaderBranch:    convertToBytesSlice(lcf.FinalityBranch),
-		FinalizedExecutionRoot:   executionRoot[:],
+		FinalizedExecutionRoot:   lcf.FinalizedHeader.GetExecutionRoot(),
 		FinalizedExecutionBranch: convertToBytesSlice(lcf.FinalizedHeader.ExecutionBranch),
 		SyncAggregate:            lcf.SyncAggregate.ToProto(),
 		SignatureSlot:            uint64(lcf.SignatureSlot),
