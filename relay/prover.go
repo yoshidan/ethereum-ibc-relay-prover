@@ -12,8 +12,10 @@ import (
 	clienttypes "github.com/cosmos/ibc-go/v8/modules/core/02-client/types"
 	ibcexported "github.com/cosmos/ibc-go/v8/modules/core/exported"
 	"github.com/datachainlab/ethereum-ibc-relay-chain/pkg/client"
-	"github.com/datachainlab/ethereum-ibc-relay-prover/beacon"
 	lctypes "github.com/datachainlab/ethereum-ibc-relay-prover/light-clients/ethereum/types"
+	"github.com/datachainlab/ethereum-light-client-types/relayer/beacon"
+	lcrelay "github.com/datachainlab/ethereum-light-client-types/relayer/relay"
+	eltypes "github.com/datachainlab/ethereum-light-client-types/relayer/types"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/hyperledger-labs/yui-relayer/core"
 	"github.com/hyperledger-labs/yui-relayer/log"
@@ -73,8 +75,8 @@ type InitialState struct {
 	BlockNumber          uint64
 	AccountStorageRoot   [32]byte
 	Timestamp            time.Time
-	CurrentSyncCommittee lctypes.SyncCommittee
-	NextSyncCommittee    lctypes.SyncCommittee
+	CurrentSyncCommittee eltypes.SyncCommittee
+	NextSyncCommittee    eltypes.SyncCommittee
 }
 
 // CreateInitialLightClientState returns a pair of ClientState and ConsensusState based on the state of the self chain at `height`.
@@ -91,12 +93,12 @@ func (pr *Prover) CreateInitialLightClientState(ctx context.Context, height ibce
 	pr.GetLogger().DebugContext(ctx, "InitialState", "initial_state", initialState)
 	committeeSize := len(initialState.CurrentSyncCommittee.Pubkeys)
 	if pr.config.IsMainnetPreset() {
-		if committeeSize != MAINNET_PRESET_SYNC_COMMITTEE_SIZE {
-			return nil, nil, fmt.Errorf("the size of current sync committee is not %v: actual=%v", MAINNET_PRESET_SYNC_COMMITTEE_SIZE, committeeSize)
+		if committeeSize != lcrelay.MAINNET_PRESET_SYNC_COMMITTEE_SIZE {
+			return nil, nil, fmt.Errorf("the size of current sync committee is not %v: actual=%v", lcrelay.MAINNET_PRESET_SYNC_COMMITTEE_SIZE, committeeSize)
 		}
 	} else {
-		if committeeSize != MINIMAL_PRESET_SYNC_COMMITTEE_SIZE {
-			return nil, nil, fmt.Errorf("the size of current sync committee is not %v: actual=%v", MINIMAL_PRESET_SYNC_COMMITTEE_SIZE, committeeSize)
+		if committeeSize != lcrelay.MINIMAL_PRESET_SYNC_COMMITTEE_SIZE {
+			return nil, nil, fmt.Errorf("the size of current sync committee is not %v: actual=%v", lcrelay.MINIMAL_PRESET_SYNC_COMMITTEE_SIZE, committeeSize)
 		}
 	}
 	clientState := pr.buildClientState(
@@ -171,7 +173,7 @@ func (pr *Prover) SetupHeadersForUpdate(ctx context.Context, counterparty core.F
 		if err != nil {
 			return nil, fmt.Errorf("failed to get bootstrap: root=%x %v", root, err)
 		}
-		lfh.TrustedSyncCommittee = &lctypes.TrustedSyncCommittee{
+		lfh.TrustedSyncCommittee = &eltypes.TrustedSyncCommittee{
 			TrustedHeight: &latestHeight,
 			SyncCommittee: bootstrapRes.Data.CurrentSyncCommittee.ToProto(),
 			IsNext:        false,
@@ -185,8 +187,8 @@ func (pr *Prover) SetupHeadersForUpdate(ctx context.Context, counterparty core.F
 
 	var (
 		headers                     []core.Header
-		trustedNextSyncCommittee    *lctypes.SyncCommittee
-		trustedCurrentSyncCommittee *lctypes.SyncCommittee
+		trustedNextSyncCommittee    *eltypes.SyncCommittee
+		trustedCurrentSyncCommittee *eltypes.SyncCommittee
 		trustedHeight               = cs.GetLatestHeight().(clienttypes.Height)
 	)
 	pr.GetLogger().DebugContext(ctx, "setup headers for updating the light-client", "state_period", statePeriod, "latest_period", latestPeriod, "client_state_latest_height", cs.GetLatestHeight().GetRevisionHeight())
@@ -215,7 +217,7 @@ func (pr *Prover) SetupHeadersForUpdate(ctx context.Context, counterparty core.F
 		pr.GetLogger().DebugContext(ctx, "the latest finalized header is the same as the trusted height", "finalized_block_number", lfh.GetHeight().GetRevisionHeight(), "trusted_block_number", trustedHeight.GetRevisionHeight())
 		return core.MakeHeaderStream(headers...), nil
 	}
-	lfh.TrustedSyncCommittee = &lctypes.TrustedSyncCommittee{
+	lfh.TrustedSyncCommittee = &eltypes.TrustedSyncCommittee{
 		TrustedHeight: &trustedHeight,
 		SyncCommittee: trustedCurrentSyncCommittee,
 		IsNext:        false,
@@ -388,7 +390,7 @@ func (pr *Prover) buildClientState(
 
 		IbcAddress:         pr.ibcAddress.Bytes(),
 		IbcCommitmentsSlot: IBCCommitmentsSlot[:],
-		TrustLevel: &lctypes.Fraction{
+		TrustLevel: &eltypes.Fraction{
 			Numerator:   2,
 			Denominator: 3,
 		},
@@ -401,7 +403,7 @@ func (pr *Prover) buildClientState(
 	}
 }
 
-func (pr *Prover) getBootstrapInPeriod(ctx context.Context, period uint64) (*lctypes.SyncCommittee, error) {
+func (pr *Prover) getBootstrapInPeriod(ctx context.Context, period uint64) (*eltypes.SyncCommittee, error) {
 	slotsPerEpoch := pr.slotsPerEpoch()
 	startSlot := pr.getPeriodBoundarySlot(period)
 	lastSlotInPeriod := pr.getPeriodBoundarySlot(period+1) - 1
@@ -426,7 +428,7 @@ func (pr *Prover) getBootstrapInPeriod(ctx context.Context, period uint64) (*lct
 	return nil, fmt.Errorf("failed to get bootstrap in period: period=%v err=%v", period, errors.Join(errs...))
 }
 
-func (pr *Prover) buildNextSyncCommitteeUpdate(ctx context.Context, period uint64, trustedHeight clienttypes.Height, trustedNextSyncCommittee *lctypes.SyncCommittee) (*lctypes.Header, error) {
+func (pr *Prover) buildNextSyncCommitteeUpdate(ctx context.Context, period uint64, trustedHeight clienttypes.Height, trustedNextSyncCommittee *eltypes.SyncCommittee) (*lctypes.Header, error) {
 	res, err := pr.beaconClient.GetLightClientUpdate(ctx, period)
 	if err != nil {
 		return nil, err
@@ -449,7 +451,7 @@ func (pr *Prover) buildNextSyncCommitteeUpdate(ctx context.Context, period uint6
 		return nil, fmt.Errorf("failed to build account update: %v", err)
 	}
 	return &lctypes.Header{
-		TrustedSyncCommittee: &lctypes.TrustedSyncCommittee{
+		TrustedSyncCommittee: &eltypes.TrustedSyncCommittee{
 			TrustedHeight: &trustedHeight,
 			SyncCommittee: trustedNextSyncCommittee,
 			IsNext:        true,
@@ -463,7 +465,7 @@ func (pr *Prover) buildNextSyncCommitteeUpdate(ctx context.Context, period uint6
 
 // buildExecutionUpdateFromFinalizedHeader builds ExecutionUpdate from finalized header.
 // Handles both Gloas (RLP-based) and pre-Gloas (SSZ merkle proof) cases.
-func (pr *Prover) buildExecutionUpdateFromFinalizedHeader(ctx context.Context, finalizedHeader *beacon.LightClientHeader) (*lctypes.ExecutionUpdate, uint64, error) {
+func (pr *Prover) buildExecutionUpdateFromFinalizedHeader(ctx context.Context, finalizedHeader *beacon.LightClientHeader) (*eltypes.ExecutionUpdate, uint64, error) {
 	if finalizedHeader.IsGloas() {
 		return pr.buildExecutionUpdateFromBlockHash(ctx, finalizedHeader.ExecutionBlockHash)
 	}

@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 	"math/big"
 
-	lctypes "github.com/datachainlab/ethereum-ibc-relay-prover/light-clients/ethereum/types"
+	lctypes "github.com/datachainlab/ethereum-light-client-types/relayer/types"
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
