@@ -74,11 +74,17 @@ func (pr *Prover) buildExecutionUpdate(executionHeader *beacon.ExecutionPayloadH
 	if err != nil {
 		return nil, err
 	}
+	blockHashBranch, err := lcrelay.GenerateExecutionPayloadHeaderProof(executionHeader, lcrelay.EXECUTION_BLOCK_HASH_LEAF_INDEX)
+	if err != nil {
+		return nil, err
+	}
 	return &lctypes.ExecutionUpdate{
 		StateRoot:         executionHeader.StateRoot,
 		StateRootBranch:   stateRootBranch,
 		BlockNumber:       executionHeader.BlockNumber,
 		BlockNumberBranch: blockNumberBranch,
+		BlockHash:         executionHeader.BlockHash,
+		BlockHashBranch:   blockHashBranch,
 	}, nil
 }
 
@@ -102,11 +108,9 @@ func (pr *Prover) buildExecutionUpdateFromBlockHash(ctx context.Context, blockHa
 	// For Gloas, we use RLP verification instead of SSZ merkle proofs
 	// The verifier will check: keccak256(rlp) == execution_block_hash
 	return &lctypes.ExecutionUpdate{
-		StateRoot:         header.Root.Bytes(),
-		StateRootBranch:   nil, // Not used in Gloas (RLP verification)
-		BlockNumber:       header.Number.Uint64(),
-		BlockNumberBranch: nil, // Not used in Gloas (RLP verification)
-		Rlp:               rlpHeader,
+		StateRoot:   header.Root.Bytes(),
+		BlockNumber: header.Number.Uint64(),
+		Rlp:         rlpHeader,
 	}, header.Time, nil
 }
 

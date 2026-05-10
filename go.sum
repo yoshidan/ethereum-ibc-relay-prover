@@ -406,6 +406,8 @@ github.com/datachainlab/ethereum-ibc-relay-chain v0.3.17 h1:oyDLIbc9hyp31c3OoIB5
 github.com/datachainlab/ethereum-ibc-relay-chain v0.3.17/go.mod h1:sf+ti1uM1joxhukxIyj8oDQ5yf7d+e+nl+3vtn9f5CM=
 github.com/datachainlab/ethereum-light-client-types/relayer v0.1.3 h1:dPfqmq2JKYXhcfz3bJr07JG088xrhJsSWsGN6QVshmE=
 github.com/datachainlab/ethereum-light-client-types/relayer v0.1.3/go.mod h1:GdQoZwZO/3k4vCw1uwKW9HsGoToWP9HQ22haIT3untw=
+github.com/datachainlab/ethereum-light-client-types/relayer v0.1.4/go.mod h1:GdQoZwZO/3k4vCw1uwKW9HsGoToWP9HQ22haIT3untw=
+github.com/datachainlab/ethereum-light-client-types/relayer v0.1.5/go.mod h1:GdQoZwZO/3k4vCw1uwKW9HsGoToWP9HQ22haIT3untw=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1VwoXQT9A3Wy9MM3WgvqSxFWenqJduM=
