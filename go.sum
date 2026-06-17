@@ -408,6 +408,8 @@ github.com/datachainlab/ethereum-light-client-types v0.1.0-rc1 h1:C9924aEN0sJMTZ
 github.com/datachainlab/ethereum-light-client-types v0.1.0-rc1/go.mod h1:cyMva2xUH+vXOmqas1aoZMQ2YO/GZzYQ3hWudEdxIiw=
 github.com/datachainlab/ethereum-light-client-types v0.1.0-rc2 h1:4a4/f0ayTfGF7RGsq942c9xLqH3haKToZIcDuP7Q2EI=
 github.com/datachainlab/ethereum-light-client-types v0.1.0-rc2/go.mod h1:cyMva2xUH+vXOmqas1aoZMQ2YO/GZzYQ3hWudEdxIiw=
+github.com/datachainlab/ethereum-light-client-types v0.1.0-rc3 h1:cTGkrzKZ0c1UA0ULasOwcOPFfM9gbspVVdb1RLPAVps=
+github.com/datachainlab/ethereum-light-client-types v0.1.0-rc3/go.mod h1:cyMva2xUH+vXOmqas1aoZMQ2YO/GZzYQ3hWudEdxIiw=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1VwoXQT9A3Wy9MM3WgvqSxFWenqJduM=
