@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/datachainlab/ethereum-light-client-types/prover/beacon"
 	lcrelay "github.com/datachainlab/ethereum-light-client-types/prover/relay"
@@ -40,6 +41,6 @@ func (pr *Prover) getPeriodWithBlockNumber(ctx context.Context, blockNumber uint
 	return lcrelay.GetPeriodWithBlockNumber(ctx, pr.beaconClient, pr.executionClient, pr.config.Network, blockNumber)
 }
 
-func (pr *Prover) buildExecutionUpdateFromFinalizedHeader(ctx context.Context, finalizedHeader *beacon.LightClientHeader) (*lctypes.ExecutionUpdate, uint64, error) {
+func (pr *Prover) buildExecutionUpdateFromFinalizedHeader(_ context.Context, finalizedHeader *beacon.LightClientHeader) (*lctypes.ExecutionUpdate, uint64, error) {
 	return lcrelay.BuildExecutionUpdateFromFinalizedHeader(finalizedHeader, false)
 }
