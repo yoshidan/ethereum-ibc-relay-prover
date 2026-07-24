@@ -2,7 +2,6 @@ package relay
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/datachainlab/ethereum-light-client-types/prover/beacon"
 	lcrelay "github.com/datachainlab/ethereum-light-client-types/prover/relay"
