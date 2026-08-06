@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"time"
 
@@ -12,14 +11,14 @@ import (
 	clienttypes "github.com/cosmos/ibc-go/v8/modules/core/02-client/types"
 	ibcexported "github.com/cosmos/ibc-go/v8/modules/core/exported"
 	"github.com/datachainlab/ethereum-ibc-relay-chain/pkg/client"
-	"github.com/datachainlab/ethereum-ibc-relay-prover/beacon"
 	lctypes "github.com/datachainlab/ethereum-ibc-relay-prover/light-clients/ethereum/types"
+	"github.com/datachainlab/ethereum-light-client-types/prover/beacon"
+	lcrelay "github.com/datachainlab/ethereum-light-client-types/prover/relay"
+	eltypes "github.com/datachainlab/ethereum-light-client-types/prover/types"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/hyperledger-labs/yui-relayer/core"
 	"github.com/hyperledger-labs/yui-relayer/log"
 )
-
-var IBCCommitmentsSlot = common.HexToHash("1ee222554989dda120e26ecacf756fe1235cd8d726706b57517715dde4f0c900")
 
 type Prover struct {
 	chain           core.Chain
@@ -73,8 +72,8 @@ type InitialState struct {
 	BlockNumber          uint64
 	AccountStorageRoot   [32]byte
 	Timestamp            time.Time
-	CurrentSyncCommittee lctypes.SyncCommittee
-	NextSyncCommittee    lctypes.SyncCommittee
+	CurrentSyncCommittee eltypes.SyncCommittee
+	NextSyncCommittee    eltypes.SyncCommittee
 }
 
 // CreateInitialLightClientState returns a pair of ClientState and ConsensusState based on the state of the self chain at `height`.
@@ -91,12 +90,12 @@ func (pr *Prover) CreateInitialLightClientState(ctx context.Context, height ibce
 	pr.GetLogger().DebugContext(ctx, "InitialState", "initial_state", initialState)
 	committeeSize := len(initialState.CurrentSyncCommittee.Pubkeys)
 	if pr.config.IsMainnetPreset() {
-		if committeeSize != MAINNET_PRESET_SYNC_COMMITTEE_SIZE {
-			return nil, nil, fmt.Errorf("the size of current sync committee is not %v: actual=%v", MAINNET_PRESET_SYNC_COMMITTEE_SIZE, committeeSize)
+		if committeeSize != lcrelay.MAINNET_PRESET_SYNC_COMMITTEE_SIZE {
+			return nil, nil, fmt.Errorf("the size of current sync committee is not %v: actual=%v", lcrelay.MAINNET_PRESET_SYNC_COMMITTEE_SIZE, committeeSize)
 		}
 	} else {
-		if committeeSize != MINIMAL_PRESET_SYNC_COMMITTEE_SIZE {
-			return nil, nil, fmt.Errorf("the size of current sync committee is not %v: actual=%v", MINIMAL_PRESET_SYNC_COMMITTEE_SIZE, committeeSize)
+		if committeeSize != lcrelay.MINIMAL_PRESET_SYNC_COMMITTEE_SIZE {
+			return nil, nil, fmt.Errorf("the size of current sync committee is not %v: actual=%v", lcrelay.MINIMAL_PRESET_SYNC_COMMITTEE_SIZE, committeeSize)
 		}
 	}
 	clientState := pr.buildClientState(
@@ -171,7 +170,7 @@ func (pr *Prover) SetupHeadersForUpdate(ctx context.Context, counterparty core.F
 		if err != nil {
 			return nil, fmt.Errorf("failed to get bootstrap: root=%x %v", root, err)
 		}
-		lfh.TrustedSyncCommittee = &lctypes.TrustedSyncCommittee{
+		lfh.TrustedSyncCommittee = &eltypes.TrustedSyncCommittee{
 			TrustedHeight: &latestHeight,
 			SyncCommittee: bootstrapRes.Data.CurrentSyncCommittee.ToProto(),
 			IsNext:        false,
@@ -185,8 +184,8 @@ func (pr *Prover) SetupHeadersForUpdate(ctx context.Context, counterparty core.F
 
 	var (
 		headers                     []core.Header
-		trustedNextSyncCommittee    *lctypes.SyncCommittee
-		trustedCurrentSyncCommittee *lctypes.SyncCommittee
+		trustedNextSyncCommittee    *eltypes.SyncCommittee
+		trustedCurrentSyncCommittee *eltypes.SyncCommittee
 		trustedHeight               = cs.GetLatestHeight().(clienttypes.Height)
 	)
 	pr.GetLogger().DebugContext(ctx, "setup headers for updating the light-client", "state_period", statePeriod, "latest_period", latestPeriod, "client_state_latest_height", cs.GetLatestHeight().GetRevisionHeight())
@@ -215,7 +214,7 @@ func (pr *Prover) SetupHeadersForUpdate(ctx context.Context, counterparty core.F
 		pr.GetLogger().DebugContext(ctx, "the latest finalized header is the same as the trusted height", "finalized_block_number", lfh.GetHeight().GetRevisionHeight(), "trusted_block_number", trustedHeight.GetRevisionHeight())
 		return core.MakeHeaderStream(headers...), nil
 	}
-	lfh.TrustedSyncCommittee = &lctypes.TrustedSyncCommittee{
+	lfh.TrustedSyncCommittee = &eltypes.TrustedSyncCommittee{
 		TrustedHeight: &trustedHeight,
 		SyncCommittee: trustedCurrentSyncCommittee,
 		IsNext:        false,
@@ -230,10 +229,17 @@ func (pr *Prover) buildInitialState(ctx context.Context, blockNumber uint64) (*I
 	if err != nil {
 		return nil, fmt.Errorf("failed to get light-client finality update: %v", err)
 	}
-	if eh := &res.Data.FinalizedHeader.Execution; blockNumber == 0 {
-		blockNumber = eh.BlockNumber
-	} else if eh.BlockNumber < blockNumber {
-		return nil, fmt.Errorf("the height is not finalized yet: blockNumber=%v finalized_block_number=%v", blockNumber, eh.BlockNumber)
+	finalizedHeader := &res.Data.FinalizedHeader
+
+	executionUpdate, _, err := pr.buildExecutionUpdateFromFinalizedHeader(ctx, finalizedHeader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build execution update from finalized header: %v", err)
+	}
+
+	if blockNumber == 0 {
+		blockNumber = executionUpdate.BlockNumber
+	} else if executionUpdate.BlockNumber < blockNumber {
+		return nil, fmt.Errorf("the height is not finalized yet: blockNumber=%v finalized_block_number=%v", blockNumber, executionUpdate.BlockNumber)
 	}
 
 	timestamp, err := pr.chain.Timestamp(ctx, pr.newHeight(int64(blockNumber)))
@@ -290,29 +296,28 @@ func (pr *Prover) GetLatestFinalizedHeader(ctx context.Context) (headers core.He
 		return nil, err
 	}
 	lcUpdate := res.Data.ToProto()
-	executionHeader := &res.Data.FinalizedHeader.Execution
-	executionUpdate, err := pr.buildExecutionUpdate(executionHeader)
+	finalizedHeader := &res.Data.FinalizedHeader
+
+	executionUpdate, timestamp, err := pr.buildExecutionUpdateFromFinalizedHeader(ctx, finalizedHeader)
 	if err != nil {
-		return nil, fmt.Errorf("failed to build execution update: %v", err)
+		return nil, fmt.Errorf("failed to build execution update from finalized header: %v", err)
 	}
-	executionRoot, err := executionHeader.HashTreeRoot()
-	if err != nil {
-		return nil, fmt.Errorf("failed to calculate execution root: %v", err)
-	}
-	if !bytes.Equal(executionRoot[:], lcUpdate.FinalizedExecutionRoot) {
+
+	executionRoot := finalizedHeader.GetExecutionRoot()
+	if !bytes.Equal(executionRoot, lcUpdate.FinalizedExecutionRoot) {
 		return nil, fmt.Errorf("execution root mismatch: %X != %X", executionRoot, lcUpdate.FinalizedExecutionRoot)
 	}
 
-	accountUpdate, err := pr.buildAccountUpdate(ctx, executionHeader.BlockNumber)
+	accountUpdate, err := pr.buildAccountUpdate(ctx, executionUpdate.BlockNumber)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build account update: %v", err)
 	}
-	pr.GetLogger().InfoContext(ctx, "build latest finalized header", "block_number", executionHeader.BlockNumber, "timestamp", executionHeader.Timestamp, "state_root", hex.EncodeToString(executionHeader.StateRoot))
+	pr.GetLogger().InfoContext(ctx, "build latest finalized header", "block_number", executionUpdate.BlockNumber, "timestamp", timestamp, "state_root", hex.EncodeToString(executionUpdate.StateRoot))
 	return &lctypes.Header{
 		ConsensusUpdate: lcUpdate,
 		ExecutionUpdate: executionUpdate,
 		AccountUpdate:   accountUpdate,
-		Timestamp:       executionHeader.Timestamp,
+		Timestamp:       timestamp,
 	}, nil
 }
 
@@ -381,8 +386,8 @@ func (pr *Prover) buildClientState(
 		EpochsPerSyncCommitteePeriod: pr.epochsPerSyncCommitteePeriod(),
 
 		IbcAddress:         pr.ibcAddress.Bytes(),
-		IbcCommitmentsSlot: IBCCommitmentsSlot[:],
-		TrustLevel: &lctypes.Fraction{
+		IbcCommitmentsSlot: lcrelay.IBCCommitmentsSlot(),
+		TrustLevel: &eltypes.Fraction{
 			Numerator:   2,
 			Denominator: 3,
 		},
@@ -395,56 +400,35 @@ func (pr *Prover) buildClientState(
 	}
 }
 
-func (pr *Prover) getBootstrapInPeriod(ctx context.Context, period uint64) (*lctypes.SyncCommittee, error) {
-	slotsPerEpoch := pr.slotsPerEpoch()
-	startSlot := pr.getPeriodBoundarySlot(period)
-	lastSlotInPeriod := pr.getPeriodBoundarySlot(period+1) - 1
-	pr.GetLogger().DebugContext(ctx, "get bootstrap in period", "period", period, "start_slot", startSlot, "last_slot_in_period", lastSlotInPeriod, "slots_per_epoch", slotsPerEpoch)
-	var errs []error
-	for i := startSlot + slotsPerEpoch; i <= lastSlotInPeriod; i += slotsPerEpoch {
-		res, err := pr.beaconClient.GetBlockRoot(ctx, i, false)
-		if err != nil {
-			pr.GetLogger().WarnContext(ctx, "failed to get block root", "slot", i, "err", err)
-			errs = append(errs, err)
-			return nil, fmt.Errorf("there is no available bootstrap in period: period=%v err=%v", period, errors.Join(errs...))
-		}
-		bootstrap, err := pr.beaconClient.GetBootstrap(ctx, res.Data.Root[:])
-		if err != nil {
-			pr.GetLogger().WarnContext(ctx, "failed to get bootstrap", "root", res.Data.Root[:], "err", err)
-			errs = append(errs, err)
-			continue
-		} else {
-			return bootstrap.Data.CurrentSyncCommittee.ToProto(), nil
-		}
-	}
-	return nil, fmt.Errorf("failed to get bootstrap in period: period=%v err=%v", period, errors.Join(errs...))
+func (pr *Prover) getBootstrapInPeriod(ctx context.Context, period uint64) (*eltypes.SyncCommittee, error) {
+	pr.GetLogger().DebugContext(ctx, "get bootstrap in period", "period", period, "start_slot", pr.getPeriodBoundarySlot(period), "last_slot_in_period", pr.getPeriodBoundarySlot(period+1)-1, "slots_per_epoch", pr.slotsPerEpoch())
+	return lcrelay.GetBootstrapInPeriod(ctx, pr.beaconClient, pr.config.Network, period)
 }
 
-func (pr *Prover) buildNextSyncCommitteeUpdate(ctx context.Context, period uint64, trustedHeight clienttypes.Height, trustedNextSyncCommittee *lctypes.SyncCommittee) (*lctypes.Header, error) {
+func (pr *Prover) buildNextSyncCommitteeUpdate(ctx context.Context, period uint64, trustedHeight clienttypes.Height, trustedNextSyncCommittee *eltypes.SyncCommittee) (*lctypes.Header, error) {
 	res, err := pr.beaconClient.GetLightClientUpdate(ctx, period)
 	if err != nil {
 		return nil, err
 	}
 	lcUpdate := res.Data.ToProto()
-	executionHeader := &res.Data.FinalizedHeader.Execution
-	executionUpdate, err := pr.buildExecutionUpdate(executionHeader)
+	finalizedHeader := &res.Data.FinalizedHeader
+
+	executionUpdate, timestamp, err := pr.buildExecutionUpdateFromFinalizedHeader(ctx, finalizedHeader)
 	if err != nil {
-		return nil, fmt.Errorf("failed to build execution update: %v", err)
+		return nil, fmt.Errorf("failed to build execution update from finalized header: %v", err)
 	}
-	executionRoot, err := executionHeader.HashTreeRoot()
-	if err != nil {
-		return nil, fmt.Errorf("failed to calculate execution root: %v", err)
-	}
-	if !bytes.Equal(executionRoot[:], lcUpdate.FinalizedExecutionRoot) {
+
+	executionRoot := finalizedHeader.GetExecutionRoot()
+	if !bytes.Equal(executionRoot, lcUpdate.FinalizedExecutionRoot) {
 		return nil, fmt.Errorf("execution root mismatch: %X != %X", executionRoot, lcUpdate.FinalizedExecutionRoot)
 	}
 
-	accountUpdate, err := pr.buildAccountUpdate(ctx, executionHeader.BlockNumber)
+	accountUpdate, err := pr.buildAccountUpdate(ctx, executionUpdate.BlockNumber)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build account update: %v", err)
 	}
 	return &lctypes.Header{
-		TrustedSyncCommittee: &lctypes.TrustedSyncCommittee{
+		TrustedSyncCommittee: &eltypes.TrustedSyncCommittee{
 			TrustedHeight: &trustedHeight,
 			SyncCommittee: trustedNextSyncCommittee,
 			IsNext:        true,
@@ -452,7 +436,7 @@ func (pr *Prover) buildNextSyncCommitteeUpdate(ctx context.Context, period uint6
 		ConsensusUpdate: lcUpdate,
 		ExecutionUpdate: executionUpdate,
 		AccountUpdate:   accountUpdate,
-		Timestamp:       executionHeader.Timestamp,
+		Timestamp:       timestamp,
 	}, nil
 }
 
