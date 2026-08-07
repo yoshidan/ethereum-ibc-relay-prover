@@ -40,6 +40,6 @@ func (pr *Prover) getPeriodWithBlockNumber(ctx context.Context, blockNumber uint
 	return lcrelay.GetPeriodWithBlockNumber(ctx, pr.beaconClient, pr.executionClient, pr.config.Network, blockNumber)
 }
 
-func (pr *Prover) buildExecutionUpdateFromFinalizedHeader(_ context.Context, finalizedHeader *beacon.LightClientHeader) (*lctypes.ExecutionUpdate, uint64, error) {
-	return lcrelay.BuildExecutionUpdateFromFinalizedHeader(finalizedHeader, false)
+func (pr *Prover) buildExecutionUpdateFromFinalizedHeader(ctx context.Context, finalizedHeader *beacon.LightClientHeader) (*lctypes.ExecutionUpdate, uint64, error) {
+	return lcrelay.BuildExecutionUpdateFromFinalizedHeader(ctx, pr.executionClient.Raw(), finalizedHeader, false)
 }
