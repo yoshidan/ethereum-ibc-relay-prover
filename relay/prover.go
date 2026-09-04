@@ -250,9 +250,12 @@ func (pr *Prover) buildInitialState(ctx context.Context, blockNumber uint64) (*I
 		return nil, fmt.Errorf("ethereum timestamp must be truncated to seconds: timestamp=%v truncated_timestamp=%v", timestamp, truncatedTm)
 	}
 
-	slot, err := pr.getSlotAtTimestamp(ctx, uint64(timestamp.Unix()))
+	// Must match how SetupHeadersForUpdate derives the period from the stored height,
+	// otherwise the committees recorded here and the ones sent on the next update
+	// disagree whenever the finalized slot is the first slot of a period.
+	slot, err := pr.getConsensusStateSlotWithBlockNumber(ctx, blockNumber)
 	if err != nil {
-		return nil, fmt.Errorf("failed to compute slot at timestamp: %v", err)
+		return nil, fmt.Errorf("failed to compute consensus state slot: block_number=%v %v", blockNumber, err)
 	}
 
 	period := pr.computeSyncCommitteePeriod(pr.computeEpoch(slot))
