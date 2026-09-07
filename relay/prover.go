@@ -231,7 +231,7 @@ func (pr *Prover) buildInitialState(ctx context.Context, blockNumber uint64) (*I
 	}
 	finalizedHeader := &res.Data.FinalizedHeader
 
-	executionUpdate, _, err := pr.buildExecutionUpdateFromFinalizedHeader(ctx, finalizedHeader)
+	executionUpdate, err := pr.buildExecutionUpdateFromFinalizedHeader(ctx, finalizedHeader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build execution update from finalized header: %v", err)
 	}
@@ -301,7 +301,7 @@ func (pr *Prover) GetLatestFinalizedHeader(ctx context.Context) (headers core.He
 	lcUpdate := res.Data.ToProto()
 	finalizedHeader := &res.Data.FinalizedHeader
 
-	executionUpdate, timestamp, err := pr.buildExecutionUpdateFromFinalizedHeader(ctx, finalizedHeader)
+	executionUpdate, err := pr.buildExecutionUpdateFromFinalizedHeader(ctx, finalizedHeader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build execution update from finalized header: %v", err)
 	}
@@ -315,7 +315,7 @@ func (pr *Prover) GetLatestFinalizedHeader(ctx context.Context) (headers core.He
 	if err != nil {
 		return nil, fmt.Errorf("failed to build account update: %v", err)
 	}
-	pr.GetLogger().InfoContext(ctx, "build latest finalized header", "block_number", executionUpdate.BlockNumber, "timestamp", timestamp, "state_root", hex.EncodeToString(executionUpdate.StateRoot))
+	pr.GetLogger().InfoContext(ctx, "build latest finalized header", "block_number", executionUpdate.BlockNumber, "state_root", hex.EncodeToString(executionUpdate.StateRoot))
 	return &lctypes.Header{
 		ConsensusUpdate: lcUpdate,
 		ExecutionUpdate: executionUpdate,
@@ -415,7 +415,7 @@ func (pr *Prover) buildNextSyncCommitteeUpdate(ctx context.Context, period uint6
 	lcUpdate := res.Data.ToProto()
 	finalizedHeader := &res.Data.FinalizedHeader
 
-	executionUpdate, _, err := pr.buildExecutionUpdateFromFinalizedHeader(ctx, finalizedHeader)
+	executionUpdate, err := pr.buildExecutionUpdateFromFinalizedHeader(ctx, finalizedHeader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build execution update from finalized header: %v", err)
 	}

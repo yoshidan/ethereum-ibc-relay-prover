@@ -42,9 +42,6 @@ message Header {
   ConsensusUpdate consensus_update = 2;
   ExecutionUpdate execution_update = 3;
   AccountUpdate account_update = 4;
-  // 5 was `timestamp`. The light client derives it from the consensus update instead,
-  // so it is not something a relayer supplies.
-  reserved 5;
 }
 
 message FinalizedHeaderMisbehaviour {

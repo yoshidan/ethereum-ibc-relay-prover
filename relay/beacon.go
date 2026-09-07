@@ -43,6 +43,6 @@ func (pr *Prover) getConsensusStateSlotWithBlockNumber(ctx context.Context, bloc
 	return lcrelay.GetConsensusStateSlotWithBlockNumber(ctx, pr.beaconClient, pr.executionClient.Raw(), pr.config.Network, pr.config.getForkParameters(), blockNumber)
 }
 
-func (pr *Prover) buildExecutionUpdateFromFinalizedHeader(ctx context.Context, finalizedHeader *beacon.LightClientHeader) (*lctypes.ExecutionUpdate, uint64, error) {
+func (pr *Prover) buildExecutionUpdateFromFinalizedHeader(ctx context.Context, finalizedHeader *beacon.LightClientHeader) (*lctypes.ExecutionUpdate, error) {
 	return lcrelay.BuildExecutionUpdateFromFinalizedHeader(ctx, pr.executionClient.Raw(), finalizedHeader, false)
 }
