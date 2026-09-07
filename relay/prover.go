@@ -320,7 +320,6 @@ func (pr *Prover) GetLatestFinalizedHeader(ctx context.Context) (headers core.He
 		ConsensusUpdate: lcUpdate,
 		ExecutionUpdate: executionUpdate,
 		AccountUpdate:   accountUpdate,
-		Timestamp:       timestamp,
 	}, nil
 }
 
@@ -416,7 +415,7 @@ func (pr *Prover) buildNextSyncCommitteeUpdate(ctx context.Context, period uint6
 	lcUpdate := res.Data.ToProto()
 	finalizedHeader := &res.Data.FinalizedHeader
 
-	executionUpdate, timestamp, err := pr.buildExecutionUpdateFromFinalizedHeader(ctx, finalizedHeader)
+	executionUpdate, _, err := pr.buildExecutionUpdateFromFinalizedHeader(ctx, finalizedHeader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build execution update from finalized header: %v", err)
 	}
@@ -439,7 +438,6 @@ func (pr *Prover) buildNextSyncCommitteeUpdate(ctx context.Context, period uint6
 		ConsensusUpdate: lcUpdate,
 		ExecutionUpdate: executionUpdate,
 		AccountUpdate:   accountUpdate,
-		Timestamp:       timestamp,
 	}, nil
 }
 
